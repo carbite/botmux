@@ -252,7 +252,7 @@ import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByCha
 import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './services/cursor-cot.js';
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationId, findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
-import { drainAntigravityTranscript } from './services/antigravity-transcript.js';
+import { drainAntigravityTranscript, type AntigravityTranscriptState } from './services/antigravity-transcript.js';
 import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { extractKiroSessionIdFromOutput } from './services/kiro-session.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
@@ -1672,7 +1672,7 @@ function refreshCliPluginGeneration(
 ): void {
   if (cfg.promptInjection === 'none' && (!supportsZeroPromptInjection(cfg.cliId, cfg)
     || process.env[GOAL_ENV.V3_MARKER] === '1')) {
-    throw new Error('零注入需要本地 CLI 支持自动获取最终回复，暂不支持远端后端或 v3 workflow');
+    throw new Error('零注入需要本地 CLI 支持自动获取最终回复；暂不支持远端后端、v3 workflow，Cursor/Antigravity 不支持沙箱');
   }
   const bot = resolvePluginGenerationBot(cfg);
 
@@ -4965,6 +4965,11 @@ let ompBridgeState: OmpTranscriptState = {};
 let ebsdBridgeState: EbsdTranscriptState = {};
 let ompQuietCandidateKey: string | undefined;
 let ompQuietCandidateCompleteOffset: number | undefined;
+/** Antigravity held (provisional) terminal + the two-tick quiet-probe latch,
+ *  same shape as OMP's. */
+let antigravityBridgeState: AntigravityTranscriptState = {};
+let antigravityQuietCandidateKey: string | undefined;
+let antigravityQuietCandidateCompleteOffset: number | undefined;
 const ompRetiredTranscriptPaths = new Set<string>();
 const ebsdRetiredTranscriptPaths = new Set<string>();
 /** Settings are observed on the same append-only cursor as bridge output.
@@ -6842,7 +6847,7 @@ function currentHermesBridgeDbPath(): string {
 function structuredBridgeIngestPath(
   path: string,
   offset: number,
-  opts: { flushOmpTrailingFinal?: boolean } = {},
+  opts: { flushOmpTrailingFinal?: boolean; flushAntigravityTrailingFinal?: boolean } = {},
 ) {
   if (structuredBridgeIsCodex()) {
     const result = drainCodexRollout(path, offset, codexBridgeDrainState);
@@ -6855,7 +6860,11 @@ function structuredBridgeIngestPath(
     return drainTraexRollout(path, offset, { adoptMode: lastInitConfig?.adoptMode === true });
   }
   if (codexBridgeIsCursor()) return drainCursorTranscript(path, offset);
-  if (structuredBridgeIsAntigravity()) return drainAntigravityTranscript(path, offset);
+  if (structuredBridgeIsAntigravity()) {
+    return drainAntigravityTranscript(path, offset, antigravityBridgeState, {
+      flushTrailingFinal: opts.flushAntigravityTrailingFinal,
+    });
+  }
   if (structuredBridgeIsPi()) return drainPiTranscript(path, offset);
   if (structuredBridgeIsEbsd()) {
     const result = drainEbsdTranscript(path, offset, ebsdBridgeState);
@@ -6970,9 +6979,18 @@ function codexBridgeStartTimer(): void {
         // retired conversation's path is still bound. Gating only on
         // !codexBridgeRolloutPath would leave the new file unattached forever.
         if (!codexBridgeRolloutPath || codexBridgePendingSessionId) {
-          let path: string | undefined = codexBridgePendingSessionId
-            ? resolveFileBridgePath('antigravity', { sessionId: codexBridgePendingSessionId })
-            : undefined;
+          const pendingSid = codexBridgePendingSessionId;
+          // Resolution provenance matters: only the SID lookup can prove the
+          // pending id == the bound file. The pid fallback may legitimately
+          // return the RETIRED conversation (its db fd is still open while the
+          // new brain file is being created), in which case the pending NEW id
+          // must survive this tick.
+          let path: string | undefined;
+          let resolvedFromPendingSid = false;
+          if (pendingSid) {
+            path = resolveFileBridgePath('antigravity', { sessionId: pendingSid });
+            resolvedFromPendingSid = path !== undefined;
+          }
           if (!path) {
             const pid = currentAntigravityObservedPid();
             if (pid) path = resolveFileBridgePath('antigravity', { pid });
@@ -6982,10 +7000,12 @@ function codexBridgeStartTimer(): void {
             codexAdoptPendingPid = undefined;
             if (codexBridgeRolloutPath) {
               // Rotation (/new) resolved via the ticker after a lazy-create
-              // wait: drain the retired file, then bind the new one fresh so
-              // its live turn is ingested from byte 0 (never as history).
+              // wait: release the retired conversation's held final (a new
+              // conversation starting proves the old loop ended), then bind
+              // the new one fresh so its live turn is ingested from byte 0
+              // (never as history).
               try {
-                codexBridgeIngest();
+                codexBridgeIngest({ flushAntigravityTrailingFinal: true });
                 emitReadyCodexTurns();
               } catch (err: any) {
                 log(`Antigravity late-rotation bridge drain failed: ${err.message}`);
@@ -6995,14 +7015,17 @@ function codexBridgeStartTimer(): void {
             } else {
               codexBridgeAttach(path, antigravityLateAttachMode(path));
             }
-          } else if (path === codexBridgeRolloutPath && codexBridgePendingSessionId) {
+          } else if (path === codexBridgeRolloutPath && resolvedFromPendingSid) {
             // The pending conversation turned out to be the one already bound
             // (id reported before its file existed). Clear the pending marker
-            // so subsequent ticks don't re-resolve it every second.
+            // so subsequent ticks don't re-resolve it every second. A PID-hit
+            // on the same path is NOT proof for the pending id and leaves it
+            // intact for the next tick.
             codexBridgePendingSessionId = undefined;
           }
         }
         codexBridgeIngest();
+        maybeFlushAntigravityTrailingFinalOnQuietTick();
         if (isPromptReady) emitReadyCodexTurns();
         return;
       }
@@ -7059,6 +7082,7 @@ function codexBridgeStartTimer(): void {
       }
       codexBridgeIngest();
       maybeFlushOmpTrailingFinalOnQuietTick();
+      maybeFlushAntigravityTrailingFinalOnQuietTick();
       if (isPromptReady) emitReadyCodexTurns();
     } catch (err: any) {
       log(`Codex bridge tick error: ${err.message}`);
@@ -7157,8 +7181,11 @@ function mtrBridgeIngest(): void {
 function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'baseline-existing-skip-tail' | 'fresh-empty' | 'split-live'): void {
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
   codexBridgeRolloutPath = rolloutPath;
   codexBridgeDrainState = undefined;
   if (structuredBridgeIsCodex()) codexServiceTierTracker.bind(rolloutPath);
@@ -7409,8 +7436,11 @@ function codexBridgeDetachFile(): void {
   codexBridgeBaselineDone = false;
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
 }
 
 /** Resolve the pid of the Codex process this worker observes (spawned child or
@@ -7720,7 +7750,9 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
         // existing bytes are THIS session's live turn, never history →
         // fresh-empty regardless of the spawn resume flag.
         try {
-          codexBridgeIngest();
+          // Flush the retired conversation's held candidate: the new
+          // conversation starting proves the old loop ended.
+          codexBridgeIngest({ flushAntigravityTrailingFinal: true });
           emitReadyCodexTurns();
         } catch (err: any) {
           log(`Antigravity pre-rotation bridge drain failed: ${err.message}`);
@@ -7877,6 +7909,7 @@ function codexBridgeIngest(opts: {
   signalIdle?: boolean;
   hydrationOwnerKey?: string;
   flushOmpTrailingFinal?: boolean;
+  flushAntigravityTrailingFinal?: boolean;
 } = {}): void {
   // Follow-up RPC turns install their exact bridge mark only after the
   // turn/start ACK passes the generation fence. Ordinary ingest must not
@@ -7898,9 +7931,13 @@ function codexBridgeIngest(opts: {
   if (!codexBridgeRolloutPath || !codexBridgeBaselineDone) return;
   const result = structuredBridgeIngestPath(codexBridgeRolloutPath, codexBridgeOffset, {
     flushOmpTrailingFinal: opts.flushOmpTrailingFinal,
+    flushAntigravityTrailingFinal: opts.flushAntigravityTrailingFinal,
   });
   codexBridgeOffset = result.newOffset;
   codexBridgePendingTail = result.pendingTail;
+  if (structuredBridgeIsAntigravity()) {
+    antigravityBridgeState = (result as { state?: AntigravityTranscriptState }).state ?? {};
+  }
   if (structuredBridgeIsTraex()) {
     const traex = result as TraexDrainResult;
     publishActiveRuntime({
@@ -7929,7 +7966,16 @@ function codexBridgeIngest(opts: {
   // its own moving targets). Pushing idle here lets the bridge emit
   // immediately instead of waiting for readyPattern + quiescence to
   // converge. Idempotent — IdleDetector.fireIdle no-ops while already idle.
-  if (opts.signalIdle !== false && result.events.some(event => event.kind === 'assistant_final')) {
+  //
+  // Antigravity is excluded: its assistant_final is PROVISIONAL (held in
+  // antigravityBridgeState) and is released only by
+  // maybeFlushAntigravityTrailingFinalOnQuietTick after the viewport itself
+  // proves idle + ready. Firing idle on the intermediate "Wait for task …"
+  // step would mark the turn done while a background-task SYSTEM_MESSAGE is
+  // about to wake the planner for another round.
+  if (opts.signalIdle !== false
+    && !structuredBridgeIsAntigravity()
+    && result.events.some(event => event.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
   }
 }
@@ -7966,6 +8012,53 @@ function maybeFlushOmpTrailingFinalOnQuietTick(): void {
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
   codexBridgeIngest({ flushOmpTrailingFinal: true });
+}
+
+/**
+ * Confirm an Antigravity held (provisional) terminal only after one complete
+ * quiet bridge tick AND a viewport that is on the ready marker with no busy
+ * marker. The held candidate is the content-only "Wait for task …" shape ~17%
+ * of turns produce before a background-task/stop-hook SYSTEM_MESSAGE wakes the
+ * planner; releasing it the moment it lands would post the interim narration
+ * and lose the real final.
+ *
+ * Unlike OMP this driver is NOT lifecycle-blocking, so the screen evidence is
+ * the only gate: require BOTH ready (`? for shortcuts`) and not-busy
+ * (`esc to cancel`). The intermediate background-task wait shows the READY
+ * marker, but the subsequent wake-up produces a busy screen within ~1s, so the
+ * two-tick unchanged-offset latch lets that continuation cancel the candidate
+ * before it is flushed. */
+function maybeFlushAntigravityTrailingFinalOnQuietTick(): void {
+  if (!structuredBridgeIsAntigravity()) return;
+  const candidate = antigravityBridgeState.provisionalFinal;
+  if (!candidate) {
+    antigravityQuietCandidateKey = undefined;
+    antigravityQuietCandidateCompleteOffset = undefined;
+    return;
+  }
+  const key = candidate.uuid;
+  if (antigravityQuietCandidateKey !== key
+    || antigravityQuietCandidateCompleteOffset !== codexBridgeOffset) {
+    antigravityQuietCandidateKey = key;
+    antigravityQuietCandidateCompleteOffset = codexBridgeOffset;
+    return;
+  }
+  if (codexBridgePendingTail || !backend
+    || !backendScreenEvidenceIsAuthoritativeForMutation()
+    || !cliAdapter?.busyPattern || !cliAdapter.readyPattern) return;
+  try {
+    const screen = captureBackendScreen(backend);
+    if (!screen) return;
+    if (cliAdapter.busyPattern.test(busyProbeRegion(screen))) return;
+    if (!cliAdapter.readyPattern.test(stripAnsiScreenText(screen))) return;
+  } catch (err: any) {
+    log(`Antigravity quiet-final viewport capture failed: ${err.message}`);
+    return;
+  }
+
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
+  codexBridgeIngest({ flushAntigravityTrailingFinal: true });
 }
 
 /** 将 Codex 的结构化 429 终态同步为既有的限流状态。 */
@@ -8587,8 +8680,11 @@ function stopCodexBridge(): void {
   codexBridgeBaselineDone = false;
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
   ompRetiredTranscriptPaths.clear();
   ebsdRetiredTranscriptPaths.clear();
   hermesBridgeOffset = 0;

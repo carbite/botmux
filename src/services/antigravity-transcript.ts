@@ -11,30 +11,33 @@
  *
  *   - type:"USER_INPUT" (source:"USER_EXPLICIT")            → kind:'user'
  *   - type:"PLANNER_RESPONSE", non-empty string `content`
- *     and NO `tool_calls`                                    → kind:'assistant_final'
+ *     and NO (non-empty) `tool_calls`                       → provisional
+ *                                                             kind:'assistant_final'
  *
- * Rationale for the terminal rule (validated against 465 real transcripts,
- * ~6.7k PLANNER_RESPONSE records): every continuing planner step carries a
- * non-empty tool_calls array; the agent loop ends the turn with a content-only
- * PLANNER_RESPONSE. Content is a string on ~8% of tool-calling steps (short
- * narration such as "Wait for task to complete.") — those are dropped because
- * tool_calls is non-empty. An empty/missing tool_calls field with non-empty
- * content is treated as terminal (the empty-array shape was never observed in
- * real logs but is accepted defensively).
+ * Provisional terminal — why the final is held back:
+ * In ~17% of real turns the planner emits a content-only step while the turn
+ * is NOT actually over — "Wait for task X to finish." while a shell tool runs
+ * as a BACKGROUND task. The TUI returns to idle, then a SYSTEM_MESSAGE
+ * (background-task result / stop-hook) wakes the planner and it continues with
+ * new tool calls; the user-facing answer only comes later. Emitting the first
+ * content-only step immediately would dequeue the turn and lose the real
+ * final. The candidate therefore stays in the drainer STATE until either:
+ *   - the next USER_INPUT arrives (proves the previous loop ended), or
+ *   - the worker's guarded quiet-tick confirms (1s of unchanged offset AND a
+ *     viewport that is both not-busy and shows the ready marker) and calls
+ *     drain with flushTrailingFinal:true.
  *
- * Known accepted gaps (same class the cursor drainer documents):
+ * Continuation records cancel a held candidate: a PLANNER_RESPONSE carrying a
+ * non-empty tool_calls array, a GENERIC tool-output line, or a
+ * SYSTEM_MESSAGE / ERROR_MESSAGE. CHECKPOINT / TASK_NOTIFICATION neither
+ * confirm nor cancel (they can follow a real final while the turn is done).
+ *
+ * Other accepted gaps:
  *   - An EMPTY content/no-tool_calls PLANNER_RESPONSE precedes a
  *     "model output must contain either output text or tool calls" ERROR and a
  *     retry step — it is NOT terminal, so empty records produce no event.
- *   - Stop-hook / background-task reactivation can inject a SYSTEM_MESSAGE
- *     after a content-only step and make the planner continue ("Wait for task
- *     … to finish." followed by new tool calls). Such a step can look terminal
- *     until the reactivation lands; the CLI screen shows busy again while it
- *     does, so the worker's screen-idle emit gate normally holds the turn.
- *   - ERROR_MESSAGE / SYSTEM_MESSAGE / CHECKPOINT / TASK_NOTIFICATION and
- *     tool output (GENERIC) are ignored. Interrupted turns therefore emit
- *     nothing (the safe failure mode) rather than a half-answer; the screen
- *     idle/termination path still closes the card.
+ *   - An interrupted turn emits nothing (the safe failure mode) rather than a
+ *     half-answer; the screen idle/termination path still closes the card.
  *
  * USER_INPUT content is agy's own envelope: `<USER_REQUEST>\n<submitted
  * payload>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>…`. The submitted payload is
@@ -84,31 +87,11 @@ export function unwrapAntigravityUserInput(content: string): string {
   return content.slice(innerStart, closeAt);
 }
 
-function recordTimestampMs(rec: any): number {
-  const ms = Date.parse(rec?.created_at);
-  return Number.isFinite(ms) ? ms : Date.now();
-}
-
-function eventFromLine(path: string, lineStart: number, obj: any, timestampMs: number): CodexBridgeEvent | undefined {
-  const type = obj?.type;
-  if (type === 'USER_INPUT') {
-    if (obj.source !== undefined && obj.source !== 'USER_EXPLICIT') return undefined;
-    const raw = typeof obj.content === 'string' ? obj.content : '';
-    const text = unwrapAntigravityUserInput(raw);
-    if (!text) return undefined;
-    return { uuid: `${path}:${lineStart}`, timestampMs, kind: 'user', text };
-  }
-  if (type === 'PLANNER_RESPONSE') {
-    // A content-only planner step ends the turn. Only a NON-EMPTY tool_calls
-    // array marks an intermediate step. Observed builds write either a
-    // non-empty array or omit the field entirely, but a defensive `[]` (or
-    // null) on some model/SDK version must not make a real final disappear.
-    if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) return undefined;
-    const text = typeof obj.content === 'string' ? obj.content : '';
-    if (!text.trim()) return undefined;
-    return { uuid: `${path}:${lineStart}`, timestampMs, kind: 'assistant_final', text };
-  }
-  return undefined;
+/** A content-only PLANNER_RESPONSE held as the turn's candidate final until a
+ *  later record proves continuation (it gets dropped) or the quiet-tick/next
+ *  user turn confirms it (it gets emitted). */
+export interface AntigravityTranscriptState {
+  provisionalFinal?: CodexBridgeEvent;
 }
 
 export interface AntigravityDrainResult {
@@ -119,11 +102,89 @@ export interface AntigravityDrainResult {
   /** A line written without its terminating \n yet — informational; only
    *  complete lines produce events. */
   pendingTail: string;
+  /** Carried candidate terminal; pass back on the next drain. */
+  state: AntigravityTranscriptState;
+}
+
+export interface AntigravityDrainOptions {
+  /** Worker-only: release the held trailing candidate after the viewport
+   *  quiet-tick probe confirmed the TUI is idle and on the ready marker. */
+  flushTrailingFinal?: boolean;
+}
+
+function recordTimestampMs(rec: any): number {
+  const ms = Date.parse(rec?.created_at);
+  return Number.isFinite(ms) ? ms : Date.now();
+}
+
+function cloneState(state: AntigravityTranscriptState | undefined): AntigravityTranscriptState {
+  const candidate = state?.provisionalFinal;
+  return candidate ? { provisionalFinal: { ...candidate } } : {};
+}
+
+/** Fold one parsed record into the drain: push confirmed events, hold/cancel
+ *  the provisional terminal. Returns the updated state. */
+function foldRecord(
+  path: string,
+  lineStart: number,
+  obj: any,
+  timestampMs: number,
+  events: CodexBridgeEvent[],
+  state: AntigravityTranscriptState,
+): AntigravityTranscriptState {
+  const type = obj?.type;
+
+  if (type === 'USER_INPUT') {
+    // Only agy's own explicit submits start bridge turns. Any other source is
+    // ignored entirely (and neither confirms nor cancels a candidate).
+    if (obj.source !== undefined && obj.source !== 'USER_EXPLICIT') return state;
+    // A new explicit user turn proves the previous loop really ended: release
+    // its held final BEFORE the user event so turns stay interleaved.
+    if (state.provisionalFinal) {
+      events.push(state.provisionalFinal);
+      state = {};
+    }
+    const raw = typeof obj.content === 'string' ? obj.content : '';
+    const text = unwrapAntigravityUserInput(raw);
+    if (text) {
+      events.push({ uuid: `${path}:${lineStart}`, timestampMs, kind: 'user', text });
+    }
+    return state;
+  }
+
+  if (type === 'PLANNER_RESPONSE') {
+    // A NON-EMPTY tool_calls array is unambiguous continuation — the planner
+    // is still acting. Defensive: an empty array / null / missing field does
+    // NOT cancel (a build emitting [] on the terminal step must not lose the
+    // final); such a content-only record becomes the candidate.
+    if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+      return {};
+    }
+    const text = typeof obj.content === 'string' ? obj.content : '';
+    if (!text.trim()) {
+      // Empty content-only step: the "model output must contain either output
+      // text or tool calls" ERROR precursor. Never a final.
+      return {};
+    }
+    // Content-only step: newest candidate wins (a later content-only step
+    // replaces an earlier held one).
+    return { provisionalFinal: { uuid: `${path}:${lineStart}`, timestampMs, kind: 'assistant_final', text } };
+  }
+
+  // Tool output reaching the transcript after a content-only step means the
+  // loop is still running (background-task shape), as does any system message
+  // (stop-hook / task-completion wake-up) or error record.
+  if (type === 'GENERIC' || type === 'SYSTEM_MESSAGE' || type === 'ERROR_MESSAGE' || type === 'ERROR') {
+    return {};
+  }
+
+  // CHECKPOINT / TASK_NOTIFICATION / unknown types neither confirm nor cancel.
+  return state;
 }
 
 /**
  * Increment-read the transcript from `fromOffset`. Mirrors the byte-offset
- * contract of drainCursorTranscript / drainCodexRollout so the worker reuses
+ * contract of drainCursorTranscript / drainOmpTranscript so the worker reuses
  * the same fs.watch / poll wakeup machinery and the shared CodexBridgeQueue.
  *
  * The log is append-only for the life of a conversation; a size that shrank
@@ -131,12 +192,24 @@ export interface AntigravityDrainResult {
  * from zero — wait for it to grow past the consumed byte, exactly like the
  * cursor drainer.
  */
-export function drainAntigravityTranscript(path: string, fromOffset: number): AntigravityDrainResult {
-  if (!existsSync(path)) return { events: [], newOffset: fromOffset, pendingTail: '' };
+export function drainAntigravityTranscript(
+  path: string,
+  fromOffset: number,
+  incomingState: AntigravityTranscriptState = {},
+  options: AntigravityDrainOptions = {},
+): AntigravityDrainResult {
+  if (!existsSync(path)) return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) };
   let size: number;
-  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '' }; }
-  if (size < fromOffset) return { events: [], newOffset: fromOffset, pendingTail: '' };
-  if (size === fromOffset) return { events: [], newOffset: fromOffset, pendingTail: '' };
+  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) }; }
+  if (size < fromOffset) return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) };
+  if (size === fromOffset) {
+    // Nothing new on disk, but the caller may be releasing a held candidate.
+    if (options.flushTrailingFinal && incomingState.provisionalFinal) {
+      const events = [incomingState.provisionalFinal];
+      return { events, newOffset: fromOffset, pendingTail: '', state: {} };
+    }
+    return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) };
+  }
 
   const len = size - fromOffset;
   const buf = Buffer.alloc(len);
@@ -149,6 +222,7 @@ export function drainAntigravityTranscript(path: string, fromOffset: number): An
   let newOffset = fromOffset + Buffer.byteLength(completeText, 'utf8');
 
   const events: CodexBridgeEvent[] = [];
+  let state = cloneState(incomingState);
   let cursor = fromOffset;
   for (const line of completeText.split('\n')) {
     if (line.length === 0) {
@@ -160,22 +234,25 @@ export function drainAntigravityTranscript(path: string, fromOffset: number): An
     cursor += lineByteLen;
     let obj: any;
     try { obj = JSON.parse(line); } catch { continue; }
-    const ev = eventFromLine(path, lineStart, obj, recordTimestampMs(obj));
-    if (ev) events.push(ev);
+    state = foldRecord(path, lineStart, obj, recordTimestampMs(obj), events, state);
   }
 
   // The final object may sit at EOF without a trailing \n until the next turn.
-  // Consume it only once it parses completely; otherwise keep it pending.
+  // Fold it only once it parses completely; otherwise keep it pending.
   if (pendingTail.length > 0) {
     try {
       const obj = JSON.parse(pendingTail);
-      const ev = eventFromLine(path, newOffset, obj, recordTimestampMs(obj));
-      if (ev) events.push(ev);
+      state = foldRecord(path, newOffset, obj, recordTimestampMs(obj), events, state);
       newOffset = size;
       pendingTail = '';
     } catch {
       // Still being written.
     }
   }
-  return { events, newOffset, pendingTail };
+
+  if (options.flushTrailingFinal && state.provisionalFinal) {
+    events.push(state.provisionalFinal);
+    state.provisionalFinal = undefined;
+  }
+  return { events, newOffset, pendingTail, state };
 }

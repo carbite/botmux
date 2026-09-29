@@ -50,6 +50,10 @@ describe('structured-bridge-clis', () => {
     expect(isStructuredBridgeFallbackActive('antigravity')).toBe(false);
     expect(isStructuredBridgeFallbackActive('antigravity', false, true)).toBe(true);
     expect(isStructuredBridgeFallbackActive('antigravity', false, false)).toBe(false);
+    // antigravity has no /adopt bridge — adopt must win over the zero-prompt
+    // flag rather than silently routing an adopted pane through the spawn path.
+    expect(isStructuredBridgeFallbackActive('antigravity', true, true)).toBe(false);
+    expect(isStructuredBridgeFallbackActive('antigravity', true, false)).toBe(false);
     expect(isStructuredBridgeFallbackActive('grok')).toBe(true);
     expect(isStructuredBridgeFallbackActive('hermes')).toBe(true);
   });

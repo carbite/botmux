@@ -116,7 +116,8 @@ export function isStructuredBridgeLifecycleBlockingCli(cliId: string | undefined
 }
 
 /** Worker `codexBridgeFallbackActive` — cursor when adopt OR zero-prompt;
- *  antigravity only under zero-prompt. */
+ *  antigravity only under zero-prompt (it has no /adopt bridge — never active
+ *  in adopt mode even if both flags are passed). */
 export function isStructuredBridgeFallbackActive(
   cliId: string | undefined,
   adoptMode?: boolean,
@@ -127,7 +128,7 @@ export function isStructuredBridgeFallbackActive(
   if (!cliId) return false;
   if (ALWAYS_SET.has(cliId)) return true;
   if (cliId === 'cursor') return adoptMode === true || zeroPrompt === true;
-  if (cliId === 'antigravity') return zeroPrompt === true;
+  if (cliId === 'antigravity') return adoptMode !== true && zeroPrompt === true;
   return false;
 }
 

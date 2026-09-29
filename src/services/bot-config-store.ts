@@ -333,6 +333,7 @@ async function applyConfigFieldInternal(
     if (zeroPrompt && !supportsZeroPromptInjection(nextCliId, {
       backendType: spec.configKey === 'backendType' ? (effective as string | undefined) : entry.backendType as string | undefined,
       codexRpcInput: spec.configKey === 'codexRpcInput' ? effective === true : entry.codexRpcInput === true,
+      sandbox: spec.configKey === 'sandbox' ? effective === true : entry.sandbox === true,
     })) {
       return { write: false, result: 'zero_prompt_unsupported' };
     }

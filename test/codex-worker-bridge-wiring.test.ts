@@ -76,16 +76,63 @@ describe('Codex worker structured-bridge wiring', () => {
     // the new (not-yet-on-disk) conversation id as pending while the RETIRED
     // file stayed bound, so the guard was permanently false and the new
     // conversation was never attached.
-    const marker = 'if (structuredBridgeIsAntigravity()) {';
-    const branchIdx = workerSource.indexOf(marker);
+    // Anchor on the ticker branch, not the identically-named ingest branch:
+    // the ticker block is the one carrying the no-/adopt comment.
+    const anchor = workerSource.indexOf('Antigravity has no /adopt bridge');
+    expect(anchor).toBeGreaterThan(0);
+    const branchIdx = workerSource.lastIndexOf('if (structuredBridgeIsAntigravity()) {', anchor);
     expect(branchIdx).toBeGreaterThan(0);
-    const branch = workerSource.slice(branchIdx, branchIdx + 2400);
+    const branch = workerSource.slice(branchIdx, branchIdx + 3200);
     expect(branch).toContain('!codexBridgeRolloutPath || codexBridgePendingSessionId');
-    // Resolving a different file while bound must rotate: drain the retired
-    // file, detach, then attach the new one fresh.
+    // Resolving a different file while bound must rotate: flush the retired
+    // conversation's held provisional final, detach, then attach the new one
+    // fresh.
     expect(branch).toContain('path !== codexBridgeRolloutPath');
+    expect(branch).toContain('flushAntigravityTrailingFinal: true');
     expect(branch.indexOf('codexBridgeDetachFile();')).toBeGreaterThan(0);
     expect(branch.indexOf('codexBridgeDetachFile();')).toBeLessThan(branch.indexOf("codexBridgeAttach(path, 'fresh-empty');"));
+  });
+
+  it('antigravity ticker only clears pending when the SID lookup hit the bound path (pid fallback may return the retired conversation)', () => {
+    // Regression: during a /new lazy-create wait the pid probe resolves the
+    // RETIRED conversation A (its db fd is still open) while pending holds the
+    // NEW conversation B. Clearing pending on any same-path hit would drop B
+    // forever. Provenance must distinguish a SID-resolved hit from a pid hit.
+    const anchor = workerSource.indexOf('Antigravity has no /adopt bridge');
+    expect(anchor).toBeGreaterThan(0);
+    const branchIdx = workerSource.lastIndexOf('if (structuredBridgeIsAntigravity()) {', anchor);
+    expect(branchIdx).toBeGreaterThan(0);
+    const branch = workerSource.slice(branchIdx, branchIdx + 3200);
+    expect(branch).toContain('let resolvedFromPendingSid = false');
+    expect(branch).toMatch(/resolveFileBridgePath\('antigravity', \{ sessionId: pendingSid \}\)/);
+    // The same-path clear is gated on the SID provenance flag, not on path
+    // equality alone: the else-if condition itself must carry the flag.
+    expect(branch).toContain('path === codexBridgeRolloutPath && resolvedFromPendingSid');
+    // And the pid fallback runs WITHOUT touching the pending marker.
+    const pidProbe = branch.slice(branch.indexOf('currentAntigravityObservedPid'), branch.indexOf('if (path &&'));
+    expect(pidProbe).not.toContain('codexBridgePendingSessionId');
+  });
+
+  it('releases the antigravity provisional final only from a guarded ready+not-busy quiet tick', () => {
+    const fnStart = workerSource.indexOf('function maybeFlushAntigravityTrailingFinalOnQuietTick');
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = workerSource.indexOf('/** 将 Codex 的结构化 429', fnStart);
+    const fn = workerSource.slice(fnStart, fnEnd);
+    // Two-tick unchanged-offset latch…
+    expect(fn).toContain('antigravityQuietCandidateKey');
+    // …and BOTH screen conditions (ready marker present, busy marker absent).
+    expect(fn).toContain('cliAdapter.busyPattern.test(busyProbeRegion(screen))');
+    expect(fn).toContain('cliAdapter.readyPattern.test(stripAnsiScreenText(screen))');
+    expect(fn).toContain('codexBridgeIngest({ flushAntigravityTrailingFinal: true })');
+    // The flush is driven from the 1s ticker.
+    expect(workerSource).toContain('maybeFlushAntigravityTrailingFinalOnQuietTick();');
+  });
+
+  it('does not fire the idle detector from an antigravity transcript final (screen owns its turn boundary)', () => {
+    const fnStart = workerSource.indexOf('function codexBridgeIngest');
+    const fnEnd = workerSource.indexOf('function maybeFlushOmpTrailingFinalOnQuietTick', fnStart);
+    const fn = workerSource.slice(fnStart, fnEnd);
+    expect(fn).toContain('!structuredBridgeIsAntigravity()');
   });
 
   it('notifies the bridge when the antigravity pid observer resolves a conversation id', () => {

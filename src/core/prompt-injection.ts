@@ -13,10 +13,22 @@ export type PromptInjection = 'default' | 'none';
  *    structured ALWAYS set), which deliver finals in every injection mode;
  *  - the zero-prompt-only structured CLIs (cursor / antigravity), whose bridge
  *    activates ONLY while promptInjection:'none' — default mode they answer via
- *    `botmux send` instead. */
+ *    `botmux send` instead.
+ *
+ * Sandbox: the zero-prompt-only CLIs write their transcripts under
+ * `~/.cursor` / `~/.gemini`, which bwrap does NOT redirect (only claude/codex
+ * get a bound BOT_HOME) or bind into the mount namespace — the host daemon
+ * would watch a path that never receives the sandboxed CLI's writes and zero
+ * injection would silently drop every reply. Reject that combination up front
+ * instead of failing quietly at runtime. */
+const SANDBOX_INVISIBLE_TRANSCRIPT_CLI_IDS = new Set(['cursor', 'antigravity']);
+
 export function supportsZeroPromptInjection(cliId: string | undefined, opts?: {
-  backendType?: string; codexRpcInput?: boolean;
+  backendType?: string; codexRpcInput?: boolean; sandbox?: boolean;
 }): boolean {
+  if (opts?.sandbox && cliId && SANDBOX_INVISIBLE_TRANSCRIPT_CLI_IDS.has(cliId)) {
+    return false;
+  }
   const localTranscript = supportsTranscriptReplyDelivery(cliId)
     || supportsZeroPromptStructuredBridge(cliId);
   return localTranscript

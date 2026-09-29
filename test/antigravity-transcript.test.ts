@@ -86,7 +86,7 @@ describe('unwrapAntigravityUserInput', () => {
 });
 
 describe('drainAntigravityTranscript', () => {
-  it('distills one turn to user + assistant_final and skips tool/empty steps', () => {
+  it('holds the content-only terminal as provisional until the quiet-tick flush', () => {
     writeFileSync(path, [
       line(userRecord(USER_REQUEST)),
       line(plannerStep({ content: 'Wait for task to complete.', toolCalls: [toolCall('shell')], step: 1 })),
@@ -101,16 +101,23 @@ describe('drainAntigravityTranscript', () => {
     ].join(''));
 
     const r = drainAntigravityTranscript(path, 0);
-    expect(r.events.map(e => e.kind)).toEqual(['user', 'assistant_final']);
+    // Only the user event is emitted; the final is held (CHECKPOINT does not
+    // cancel it).
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
     expect(r.events[0].text).toBe(USER_REQUEST);
-    expect(r.events[1].text).toBe('修好了，重跑即可。');
     expect(r.events[0].timestampMs).toBe(Date.parse('2026-09-29T03:00:00Z'));
-    expect(r.events[1].timestampMs).toBe(Date.parse('2026-09-29T03:00:30Z'));
+    expect(r.state.provisionalFinal?.text).toBe('修好了，重跑即可。');
+    expect(r.state.provisionalFinal?.timestampMs).toBe(Date.parse('2026-09-29T03:00:30Z'));
     expect(r.pendingTail).toBe('');
     expect(r.newOffset).toBe(require('node:fs').statSync(path).size);
+
+    // Quiet-tick flush at a settled offset releases exactly one final.
+    const flushed = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(flushed.events.map(e => `${e.kind}:${e.text}`)).toEqual(['assistant_final:修好了，重跑即可。']);
+    expect(flushed.state.provisionalFinal).toBeUndefined();
   });
 
-  it('emits one user/final pair per turn across incremental drains', () => {
+  it('releases the prior held final when the next USER_INPUT arrives', () => {
     writeFileSync(path, line(userRecord('第一问')));
     let r = drainAntigravityTranscript(path, 0);
     expect(r.events).toHaveLength(1);
@@ -120,37 +127,74 @@ describe('drainAntigravityTranscript', () => {
       line(plannerStep({ content: '答案一', step: 1 })),
       line(userRecord('第二问', '2026-09-29T04:00:00Z')),
     ].join(''));
-    r = drainAntigravityTranscript(path, off1);
+    r = drainAntigravityTranscript(path, off1, r.state);
     expect(r.events.map(e => `${e.kind}:${e.text}`)).toEqual([
       'assistant_final:答案一',
       'user:第二问',
     ]);
 
     appendFileSync(path, line(plannerStep({ content: '答案二', step: 3, createdAt: '2026-09-29T04:00:05Z' })));
-    r = drainAntigravityTranscript(path, r.newOffset);
-    expect(r.events).toHaveLength(1);
-    expect(r.events[0].kind).toBe('assistant_final');
+    r = drainAntigravityTranscript(path, r.newOffset, r.state);
+    // Turn 2's final is provisional again — held, not emitted.
+    expect(r.events).toHaveLength(0);
+    expect(r.state.provisionalFinal?.text).toBe('答案二');
   });
 
-  it('consumes a complete final object at EOF without a trailing newline, then keeps partial tails pending', () => {
+  it('cancels a provisional final when the planner wakes and runs more tools (background-task shape)', () => {
+    writeFileSync(path, [
+      line(userRecord('跑下构建')),
+      line(plannerStep({ content: 'Wait for task `build-1` to finish.', toolCalls: [toolCall('shell')], step: 1 })),
+      line({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', content: 'Created At: ...' }),
+      // The background shell returns while the TUI is back at the ready
+      // marker: this content-only step is the interim narration, which the
+      // old drainer mistook for the final.
+      line(plannerStep({ content: 'Wait for task `build-1` to finish.', step: 3, createdAt: '2026-09-29T03:00:20Z' })),
+      // Task completion wakes the planner (stop-hook/message SYSTEM_MESSAGE)…
+      line({ step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE',
+        content: 'Task id "build-1" finished with result: success' }),
+      // …and it continues with more tool calls.
+      line(plannerStep({ content: 'Build green, checking artifacts.', toolCalls: [toolCall('read')], step: 5, createdAt: '2026-09-29T03:00:25Z' })),
+      line({ step_index: 6, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'artifact list' }),
+      line(plannerStep({ content: '构建通过，产物已就绪。', step: 7, createdAt: '2026-09-29T03:00:30Z' })),
+    ].join(''));
+
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    // The interim "Wait…" must NOT survive; only the real final is held.
+    expect(r.state.provisionalFinal?.text).toBe('构建通过，产物已就绪。');
+  });
+
+  it('cancels a held candidate when a GENERIC tool-output record follows it', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(plannerStep({ content: '像是收尾但其实还要收工具结果', step: 1 })),
+      line({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'tool result' }),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.state.provisionalFinal).toBeUndefined();
+  });
+
+  it('holds a provisional final from a complete EOF object without a trailing newline', () => {
     writeFileSync(path, line(userRecord('问题')));
     let r = drainAntigravityTranscript(path, 0);
     const off = r.newOffset;
     appendFileSync(path, JSON.stringify(plannerStep({ content: '答案', step: 1 }))); // no \n
-    r = drainAntigravityTranscript(path, off);
-    expect(r.events.map(e => e.kind)).toEqual(['assistant_final']);
+    r = drainAntigravityTranscript(path, off, r.state);
+    expect(r.events).toHaveLength(0);
+    expect(r.state.provisionalFinal?.text).toBe('答案');
     expect(r.newOffset).toBe(require('node:fs').statSync(path).size);
     expect(r.pendingTail).toBe('');
 
     // Half-written next line must stay pending and produce no event.
     appendFileSync(path, '\n{"step_index":2,"type":"PLANNER_RESPONSE","content":"还在写');
-    r = drainAntigravityTranscript(path, r.newOffset);
+    r = drainAntigravityTranscript(path, r.newOffset, r.state);
     expect(r.events).toHaveLength(0);
+    expect(r.state.provisionalFinal?.text).toBe('答案');
     expect(r.pendingTail).toContain('还在写');
     expect(r.newOffset).toBe(require('node:fs').statSync(path).size - Buffer.byteLength(r.pendingTail, 'utf8'));
   });
 
-  it('treats an empty tool_calls array with content as the terminal final', () => {
+  it('treats an empty tool_calls array with content as a candidate terminal', () => {
     writeFileSync(path, [
       line(userRecord('问题')),
       line(plannerStep({ content: '中间叙述', toolCalls: [toolCall('shell')], step: 1 })),
@@ -159,19 +203,21 @@ describe('drainAntigravityTranscript', () => {
       line(plannerStep({ content: '最终答案', toolCalls: [], step: 2, createdAt: '2026-09-29T03:00:30Z' })),
     ].join(''));
     const r = drainAntigravityTranscript(path, 0);
-    expect(r.events.map(e => e.kind)).toEqual(['user', 'assistant_final']);
-    expect(r.events[1].text).toBe('最终答案');
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.provisionalFinal?.text).toBe('最终答案');
   });
 
-  it('ignores non-explicit user records and ignores shrunken files', () => {
+  it('ignores non-USER_EXPLICIT user records (MODEL/SYSTEM source) and shrunken files', () => {
     writeFileSync(path, [
       line({ ...userRecord('真用户'), source: 'USER_EXPLICIT' }),
+      line({ ...userRecord('模型塞进来的'), source: 'MODEL' }),
+      line({ ...userRecord('系统塞进来的'), source: 'SYSTEM' }),
     ].join(''));
     const r1 = drainAntigravityTranscript(path, 0);
-    expect(r1.events).toHaveLength(1);
+    expect(r1.events.map(e => `${e.kind}:${e.text}`)).toEqual(['user:真用户']);
 
     // Offset past EOF (rotated/replaced file): do not replay from zero.
-    const r2 = drainAntigravityTranscript(path, r1.newOffset + 100);
+    const r2 = drainAntigravityTranscript(path, r1.newOffset + 100, r1.state);
     expect(r2.events).toHaveLength(0);
     expect(r2.newOffset).toBe(r1.newOffset + 100);
   });

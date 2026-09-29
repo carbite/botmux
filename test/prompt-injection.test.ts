@@ -36,6 +36,19 @@ describe('supportsZeroPromptInjection', () => {
     expect(supportsZeroPromptInjection('antigravity', { backendType: 'mojo' })).toBe(false);
     expect(supportsZeroPromptInjection('codex', { backendType: 'riff' })).toBe(false);
   });
+
+  it('rejects cursor/antigravity under the bwrap sandbox (host cannot read their masked transcript dirs)', () => {
+    expect(supportsZeroPromptInjection('cursor', { sandbox: true })).toBe(false);
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: true, backendType: 'tmux' })).toBe(false);
+    // Without the sandbox flag the same CLIs remain supported.
+    expect(supportsZeroPromptInjection('cursor', { sandbox: false })).toBe(true);
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: undefined })).toBe(true);
+  });
+
+  it('still allows sandboxed CLIs whose transcript root is redirected/bound (codex keeps working)', () => {
+    expect(supportsZeroPromptInjection('codex', { sandbox: true, backendType: 'pty' })).toBe(true);
+    expect(supportsZeroPromptInjection('claude-code', { sandbox: true })).toBe(true);
+  });
 });
 
 describe('sessionPromptInjection', () => {
