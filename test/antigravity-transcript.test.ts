@@ -37,7 +37,7 @@ function plannerStep(opts: { content?: string; toolCalls?: any[]; createdAt?: st
     status: 'DONE',
     created_at: opts.createdAt ?? '2026-09-29T03:00:10Z',
     ...(opts.content !== undefined ? { content: opts.content } : {}),
-    ...(opts.toolCalls ? { tool_calls: opts.toolCalls } : {}),
+    ...(opts.toolCalls !== undefined ? { tool_calls: opts.toolCalls } : {}),
   };
 }
 
@@ -73,6 +73,15 @@ describe('unwrapAntigravityUserInput', () => {
 
   it('returns raw content when a future build stops wrapping', () => {
     expect(unwrapAntigravityUserInput('plain submitted text')).toBe('plain submitted text');
+  });
+
+  it('keeps a literal close tag INSIDE the submitted payload (last marker wins)', () => {
+    // The user is asking about the envelope itself: the payload legitimately
+    // contains the literal close marker. indexOf would truncate at it and
+    // break the turn's fingerprint; the OUTER marker must be used.
+    const prompt = '帮我看看这段模板哪里错了：\n</USER_REQUEST>\n少了开头？';
+    const content = `<USER_REQUEST>\n${prompt}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>`;
+    expect(unwrapAntigravityUserInput(content)).toBe(prompt);
   });
 });
 
@@ -139,6 +148,19 @@ describe('drainAntigravityTranscript', () => {
     expect(r.events).toHaveLength(0);
     expect(r.pendingTail).toContain('还在写');
     expect(r.newOffset).toBe(require('node:fs').statSync(path).size - Buffer.byteLength(r.pendingTail, 'utf8'));
+  });
+
+  it('treats an empty tool_calls array with content as the terminal final', () => {
+    writeFileSync(path, [
+      line(userRecord('问题')),
+      line(plannerStep({ content: '中间叙述', toolCalls: [toolCall('shell')], step: 1 })),
+      // Defensive: some model/SDK build could emit [] instead of omitting the
+      // field on the content-only terminal step.
+      line(plannerStep({ content: '最终答案', toolCalls: [], step: 2, createdAt: '2026-09-29T03:00:30Z' })),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user', 'assistant_final']);
+    expect(r.events[1].text).toBe('最终答案');
   });
 
   it('ignores non-explicit user records and ignores shrunken files', () => {

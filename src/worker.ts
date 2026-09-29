@@ -6963,7 +6963,13 @@ function codexBridgeStartTimer(): void {
         // botmux-spawned zero-prompt sessions. writeInput's pid probe usually
         // reports the conversation id through codexBridgeNotifyCliSessionId;
         // the pid fallback here recovers a probe that lost the race.
-        if (!codexBridgeRolloutPath) {
+        //
+        // Resolve while UNBOUND or while a lazy-created conversation is still
+        // pending — the latter also covers a /new rotation: the notify path
+        // stored the new id while its brain file did not exist yet, and the
+        // retired conversation's path is still bound. Gating only on
+        // !codexBridgeRolloutPath would leave the new file unattached forever.
+        if (!codexBridgeRolloutPath || codexBridgePendingSessionId) {
           let path: string | undefined = codexBridgePendingSessionId
             ? resolveFileBridgePath('antigravity', { sessionId: codexBridgePendingSessionId })
             : undefined;
@@ -6971,10 +6977,24 @@ function codexBridgeStartTimer(): void {
             const pid = currentAntigravityObservedPid();
             if (pid) path = resolveFileBridgePath('antigravity', { pid });
           }
-          if (path) {
+          if (path && path !== codexBridgeRolloutPath) {
             codexBridgePendingSessionId = undefined;
             codexAdoptPendingPid = undefined;
-            codexBridgeAttach(path, antigravityLateAttachMode(path));
+            if (codexBridgeRolloutPath) {
+              // Rotation (/new) resolved via the ticker after a lazy-create
+              // wait: drain the retired file, then bind the new one fresh so
+              // its live turn is ingested from byte 0 (never as history).
+              try {
+                codexBridgeIngest();
+                emitReadyCodexTurns();
+              } catch (err: any) {
+                log(`Antigravity late-rotation bridge drain failed: ${err.message}`);
+              }
+              codexBridgeDetachFile();
+              codexBridgeAttach(path, 'fresh-empty');
+            } else {
+              codexBridgeAttach(path, antigravityLateAttachMode(path));
+            }
           }
         }
         codexBridgeIngest();
@@ -12027,6 +12047,10 @@ function observeAntigravityCliSessionId(pid: number, label = 'spawn'): void {
       persistCliSessionId(cid);
       log(`Observed Antigravity conversationId via pid ${realPid}${realPid === pid ? '' : ` (launcher ${pid})`} (${label}): ${cid}`);
       ensureAntigravityCotReader(cid);
+      // Bind the zero-prompt transcript bridge as soon as the conversation is
+      // known (its brain file may not exist yet — notify then leaves the id
+      // pending for the 1s ticker). No-op in default mode (bridge inactive).
+      if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cid);
       return;
     }
     attempts++;

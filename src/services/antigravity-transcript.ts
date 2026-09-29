@@ -16,10 +16,11 @@
  * Rationale for the terminal rule (validated against 465 real transcripts,
  * ~6.7k PLANNER_RESPONSE records): every continuing planner step carries a
  * non-empty tool_calls array; the agent loop ends the turn with a content-only
- * PLANNER_RESPONSE. tool_calls is either a non-empty array or absent (an empty
- * array was never observed). Content is a string on ~8% of tool-calling steps
- * (short narration such as "Wait for task to complete.") — those are dropped
- * because tool_calls is present.
+ * PLANNER_RESPONSE. Content is a string on ~8% of tool-calling steps (short
+ * narration such as "Wait for task to complete.") — those are dropped because
+ * tool_calls is non-empty. An empty/missing tool_calls field with non-empty
+ * content is treated as terminal (the empty-array shape was never observed in
+ * real logs but is accepted defensively).
  *
  * Known accepted gaps (same class the cursor drainer documents):
  *   - An EMPTY content/no-tool_calls PLANNER_RESPONSE precedes a
@@ -67,11 +68,18 @@ const USER_REQUEST_CLOSE = '\n</USER_REQUEST>';
 
 /** Strip agy's `<USER_REQUEST>` envelope (and its trailing
  *  <ADDITIONAL_METADATA> block), leaving exactly the submitted payload. Falls
- *  back to the raw content if the envelope is absent or malformed. */
+ *  back to the raw content if the envelope is absent or malformed.
+ *
+ *  Uses the LAST close marker: the submitted payload itself can legitimately
+ *  contain the literal string `</USER_REQUEST>` (a user asking about XML or
+ *  prompt templates), so an indexOf on the first occurrence would truncate the
+ *  prompt and break the bridge fingerprint. The newline after the open tag is
+ *  skipped only when it is actually present (do not hard-code the +1). */
 export function unwrapAntigravityUserInput(content: string): string {
   if (!content.startsWith(USER_REQUEST_OPEN)) return content;
-  const innerStart = USER_REQUEST_OPEN.length + 1; // the opening '\n'
-  const closeAt = content.indexOf(USER_REQUEST_CLOSE, innerStart);
+  const afterOpen = USER_REQUEST_OPEN.length;
+  const innerStart = content.charCodeAt(afterOpen) === 10 /* \n */ ? afterOpen + 1 : afterOpen;
+  const closeAt = content.lastIndexOf(USER_REQUEST_CLOSE);
   if (closeAt < innerStart) return content;
   return content.slice(innerStart, closeAt);
 }
@@ -91,9 +99,11 @@ function eventFromLine(path: string, lineStart: number, obj: any, timestampMs: n
     return { uuid: `${path}:${lineStart}`, timestampMs, kind: 'user', text };
   }
   if (type === 'PLANNER_RESPONSE') {
-    // A content-only planner step ends the turn. Any tool_calls array (always
-    // non-empty in observed builds) means this is an intermediate step.
-    if (obj.tool_calls !== undefined && obj.tool_calls !== null) return undefined;
+    // A content-only planner step ends the turn. Only a NON-EMPTY tool_calls
+    // array marks an intermediate step. Observed builds write either a
+    // non-empty array or omit the field entirely, but a defensive `[]` (or
+    // null) on some model/SDK version must not make a real final disappear.
+    if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) return undefined;
     const text = typeof obj.content === 'string' ? obj.content : '';
     if (!text.trim()) return undefined;
     return { uuid: `${path}:${lineStart}`, timestampMs, kind: 'assistant_final', text };

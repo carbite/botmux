@@ -69,4 +69,30 @@ describe('Codex worker structured-bridge wiring', () => {
     expect(guard).toContain('codexBridgePendingSessionId = undefined;');
     expect(guard).toContain('codexBridgeStartTimer();');
   });
+
+  it('antigravity ticker keeps resolving a pending conversation while one is already bound (/new lazy-create rotation)', () => {
+    // Regression: the antigravity branch of codexBridgeStartTimer used to run
+    // only while !codexBridgeRolloutPath. After /new, the notify path stored
+    // the new (not-yet-on-disk) conversation id as pending while the RETIRED
+    // file stayed bound, so the guard was permanently false and the new
+    // conversation was never attached.
+    const marker = 'if (structuredBridgeIsAntigravity()) {';
+    const branchIdx = workerSource.indexOf(marker);
+    expect(branchIdx).toBeGreaterThan(0);
+    const branch = workerSource.slice(branchIdx, branchIdx + 2400);
+    expect(branch).toContain('!codexBridgeRolloutPath || codexBridgePendingSessionId');
+    // Resolving a different file while bound must rotate: drain the retired
+    // file, detach, then attach the new one fresh.
+    expect(branch).toContain('path !== codexBridgeRolloutPath');
+    expect(branch.indexOf('codexBridgeDetachFile();')).toBeGreaterThan(0);
+    expect(branch.indexOf('codexBridgeDetachFile();')).toBeLessThan(branch.indexOf("codexBridgeAttach(path, 'fresh-empty');"));
+  });
+
+  it('notifies the bridge when the antigravity pid observer resolves a conversation id', () => {
+    const fnStart = workerSource.indexOf('function observeAntigravityCliSessionId');
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = workerSource.indexOf('const SUBMIT_DEFERRED_RECHECK_MS', fnStart);
+    const fn = workerSource.slice(fnStart, fnEnd);
+    expect(fn).toContain('if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cid);');
+  });
 });
