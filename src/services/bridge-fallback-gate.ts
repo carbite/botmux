@@ -429,9 +429,9 @@ export function shouldSuppressBridgeEmit(
  * visible outcome. Emit a diagnostic fallback only for that narrow case.
  *
  * Scope note (shared path): this gate feeds worker.ts:emitReadyCodexTurns,
- * which is shared by every structured-bridge CLI (Codex / Traex / Cursor / Pi /
- * Grok / Hermes / Mtr / Coco). In practice only two of them can produce an
- * empty-finalText `assistant_final` that reaches here:
+ * which is shared by every structured-bridge CLI (Codex / Traex / Cursor /
+ * Antigravity / Pi / Grok / Hermes / Mtr / Coco). In practice only two of
+ * them can produce an empty-finalText `assistant_final` that reaches here:
  *   - Traex — `task_complete` with an empty `last_agent_message`
  *     (terminalStatus undefined → treated as completed below);
  *   - Grok  — `turn_completed` + stop_reason `end_turn` where the post-tool

@@ -1,16 +1,25 @@
 import { getBot } from '../bot-registry.js';
 import type { LarkAttachment } from '../types.js';
-import { supportsTranscriptReplyDelivery } from '../services/structured-bridge-clis.js';
+import { supportsTranscriptReplyDelivery, supportsZeroPromptStructuredBridge } from '../services/structured-bridge-clis.js';
 import type { DaemonSession } from './types.js';
 
 export type PromptInjection = 'default' | 'none';
 
 /** Reuse the final-reply capability, rather than maintaining a second CLI
- * allowlist. Remote backends have their own prompt/decorate contracts. */
+ * allowlist. Remote backends have their own prompt/decorate contracts.
+ *
+ * Two harvest channels qualify:
+ *  - the ordinary transcript-reply CLIs (claude-code via its own bridge + the
+ *    structured ALWAYS set), which deliver finals in every injection mode;
+ *  - the zero-prompt-only structured CLIs (cursor / antigravity), whose bridge
+ *    activates ONLY while promptInjection:'none' — default mode they answer via
+ *    `botmux send` instead. */
 export function supportsZeroPromptInjection(cliId: string | undefined, opts?: {
   backendType?: string; codexRpcInput?: boolean;
 }): boolean {
-  return supportsTranscriptReplyDelivery(cliId)
+  const localTranscript = supportsTranscriptReplyDelivery(cliId)
+    || supportsZeroPromptStructuredBridge(cliId);
+  return localTranscript
     && (!opts?.backendType || ['pty', 'tmux', 'herdr', 'zellij', 'zmx'].includes(opts.backendType));
 }
 
