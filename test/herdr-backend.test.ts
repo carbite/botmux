@@ -1278,6 +1278,68 @@ describe('HerdrBackend callbacks', () => {
     expect(exits).toEqual([[0, null]]);
   });
 
+  it('agent list probe failures do NOT report an exit while the herdr session still exists', () => {
+    // A busy shared herdr server (several daemons polling in bursts) can fail
+    // `agent list` a few polls in a row; that says nothing about the CLI
+    // process. Reporting an exit on probe failures alone killed healthy
+    // first-turn launches right after spawn (the spawn's own detection/rename
+    // `agent list` calls contend with the very first polls).
+    let listBroken = false;
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return AGENT_LIST_REPLY('1-1');
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    listBroken = true;
+    vi.advanceTimersByTime(20_000);
+    expect(exits).toEqual([]);
+    be.kill();
+  });
+
+  it('agent list probe failures DO report an exit once the herdr session itself is gone', () => {
+    let listBroken = false;
+    let sessionGone = false;
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => (sessionGone ? EMPTY_SESSIONS_REPLY : EXISTING_SESSION_REPLY) },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return AGENT_LIST_REPLY('1-1');
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    listBroken = true;
+    vi.advanceTimersByTime(3_000);
+    expect(exits).toEqual([]);
+    sessionGone = true;
+    vi.advanceTimersByTime(3_000);
+    expect(exits).toEqual([[0, null]]);
+  });
+
   it('onExit fires when the agent stays in list with running:false (v0.6.6 tombstone)', () => {
     // herdr v0.6.6+ does NOT drop exited agents from `agent list` — they
     // stick around with running:false / status:"exited". Without this

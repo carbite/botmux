@@ -1000,7 +1000,22 @@ export class HerdrBackend implements SessionBackend {
     if (agents === null) {
       this.agentProbeFailures++;
       if (this.agentProbeFailures < MAX_AGENT_PROBE_FAILURES) return;
-      this.handleExit(0, null);
+      // `agent list` failing is a PROBE failure — a busy shared herdr server or
+      // socket contention under concurrent daemons — not evidence that the CLI
+      // died. Reporting an exit here kills a healthy CLI and visibly restarts
+      // the session (first-turn launches are especially exposed: the spawn's
+      // own detection/rename `agent list` calls contend with the very first
+      // polls). Confirm through an independent channel before declaring exit:
+      // the whole host session vanishing means the pane — and the CLI with it —
+      // is really gone. Otherwise keep polling; a real exit still surfaces via
+      // the row-absence path below once a list call succeeds again.
+      this.agentProbeFailures = 0;
+      if (HerdrBackend.probeSession(this.sessionName) === 'missing') {
+        logger.warn(`[herdr-backend] agent list failed ${MAX_AGENT_PROBE_FAILURES}x and session ${this.sessionName} is gone; reporting CLI exit`);
+        this.handleExit(0, null);
+        return;
+      }
+      logger.warn(`[herdr-backend] agent list failed ${MAX_AGENT_PROBE_FAILURES}x for session ${this.sessionName} but the session still exists; keeping the CLI alive and retrying`);
       return;
     }
     this.agentProbeFailures = 0;
