@@ -42,7 +42,7 @@ describe('dashboard desktop compat manifest', () => {
     expect(manifest.runtimeIdentity).toBeUndefined();
   });
 
-  it('advertises granular dashboard modules and excludes workflow', () => {
+  it('advertises granular dashboard modules and excludes retired modules', () => {
     const manifest = buildCompatManifest({ runtimeVersion: '2.95.0', machineId: null });
 
     expect(manifest.modules).toMatchObject({
@@ -54,6 +54,7 @@ describe('dashboard desktop compat manifest', () => {
       schedules: { supported: true, route: '#/schedules' },
       settings: { supported: true, route: '#/settings' },
       workflow: { supported: false },
+      office: { supported: false },
     });
     expect(manifest.capabilities).toMatchObject({
       'overview.read': true,
@@ -66,8 +67,10 @@ describe('dashboard desktop compat manifest', () => {
       'settings.manage': true,
       'workflow.read': false,
       'workflow.manage': false,
+      'office.read': false,
     });
     expect(manifest.routes).not.toContain('#/workflows');
+    expect(manifest.routes).not.toContain('#/office');
     expect(manifest.routes).toEqual(
       Object.values(manifest.modules)
         .filter(module => module.supported && module.route)

@@ -202,8 +202,8 @@ export interface GlobalConfig {
    *  feature OFF; set true to enable it host-wide. The
    *  `BOTMUX_WORKFLOW_ENABLED` env var overrides this when set. */
   workflow?: WorkflowFeatureGlobalConfig;
-  /** Optional HTTP(S) proxy for the daemon's own outbound downloads (e.g. the
-   *  HD2D office assets). Node's global fetch ignores HTTP_PROXY/HTTPS_PROXY,
+  /** Optional HTTP(S) proxy for the daemon's own outbound downloads (e.g. binary
+   *  updates). Node's global fetch ignores HTTP_PROXY/HTTPS_PROXY,
    *  so hosts behind a proxy must set this (or the env vars, which we read as a
    *  fallback). Form: `http://host:port` or `http://user:pass@host:port`. */
   httpProxy?: string;
