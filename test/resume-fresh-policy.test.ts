@@ -100,6 +100,25 @@ describe('worker spawnCli resume demotion (source lock)', () => {
     const block = workerSource.slice(start, start + 400);
     expect(block).toContain('!willReattachPersistent');
   });
+
+  it('suppresses the fresh-demotion notice when no CLI transcript ever existed (first-turn launch recovery)', () => {
+    // A first-turn launch that dies before the CLI writes its session file has
+    // no user-visible history; the fallback is recovery, not context loss, and
+    // the user-facing notice is a false alarm.
+    const fbStart = workerSource.indexOf('if (fallBackToFresh) {');
+    expect(fbStart).toBeGreaterThan(-1);
+    const block = workerSource.slice(fbStart, fbStart + 2400);
+    expect(block).toContain('suppressFallbackNotice');
+    expect(block).toContain('!cliTranscriptEverExisted');
+    expect(block).toContain('resumeFallbackNotified');
+  });
+
+  it('marks the transcript as existing when the bridge baselines against the JSONL file', () => {
+    const fnStart = workerSource.indexOf('function bridgeAbsorbBaseline(): void {');
+    expect(fnStart).toBeGreaterThan(-1);
+    const block = workerSource.slice(fnStart, fnStart + 800);
+    expect(block).toContain('cliTranscriptEverExisted = true');
+  });
 });
 
 // ─── Card copy wiring (source lock) ─────────────────────────────────────────

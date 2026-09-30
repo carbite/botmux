@@ -1637,6 +1637,11 @@ let tmuxRestartTimer: NodeJS.Timeout | null = null;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+/** True once the claude-family transcript bridge has SEEN the CLI session's
+ *  JSONL file exist (at attach, or lazily on first appearance). A first-turn
+ *  launch that dies before the CLI writes anything leaves no user-visible
+ *  history; its resume-fallback is a recovery detail, not context loss. */
+let cliTranscriptEverExisted = false;
 /** Skill catalog to attach to the first user turn after a prompt-less CLI restart. */
 let deferredPluginSkillCatalog: string | null = null;
 
@@ -5436,6 +5441,11 @@ function scheduleHerdrAdoptBridgeQuietEmit(): void {
 
 function bridgeAbsorbBaseline(): void {
   if (!bridgeJsonlPath) return;
+  // The transcript file exists (or just appeared): this CLI session HAS
+  // user-visible history. Recorded here so the resume-fallback notice can
+  // distinguish real context loss from a first-turn launch that died before
+  // the CLI ever wrote its session file.
+  cliTranscriptEverExisted = true;
   if (!lastInitConfig?.adoptMode) {
     // Restart recovery: if the previous generation left pending Lark turns in
     // the durable journal (worker/daemon died mid-turn), re-mark them and
@@ -15512,7 +15522,17 @@ async function spawnCli(
     }
     // Single human-visible warning. Spam guard: at most once per worker
     // lifecycle (a 4× crash loop otherwise duplicates the notice).
-    if (!resumeFallbackNotified) {
+    // claude-family only: when the transcript bridge never saw the session's
+    // JSONL file, the "history" that would not carry over never existed — the
+    // fallback is recovering a first-turn launch failure, and the pending
+    // first prompt is re-queued, not lost. Notifying the user about context
+    // they never had is a false alarm. Other CLIs (no JSONL bridge) keep the
+    // legacy always-notify behavior.
+    const suppressFallbackNotice =
+      (tier1ProbeFalse || tier2ForceFresh) && claudeDataDir !== undefined && !cliTranscriptEverExisted;
+    if (suppressFallbackNotice) {
+      log(`Resume fallback notice suppressed: no CLI transcript ever existed for this session (first-turn launch recovery); nothing user-visible was lost`);
+    } else if (!resumeFallbackNotified) {
       resumeFallbackNotified = true;
       send({
         type: 'user_notify',
