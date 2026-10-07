@@ -97,7 +97,9 @@ setInterval(() => {}, 1000);
     child.send({
       type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root',
       workingDir: dataDir, cliId: 'codex', cliPathOverride: fakeCli,
-      backendType,
+      // The isolated HOME has no rcfiles; interactive zsh otherwise parks in
+      // zsh-newuser-install on macOS before the fake CLI can even start.
+      backendType, launchShell: '/bin/sh',
       prompt: 'only-this-startup-prompt', turnId: 'om_test', larkAppId: 'app_test', larkAppSecret: 'secret',
     } satisfies DaemonToWorker);
     await waitFor(() => existsSync(loadingFile));

@@ -1148,7 +1148,7 @@ export const messages: Record<string, string> = {
   // ─── Worker → daemon notices ─────────────────────────────────────────────
   'worker.adopted_session_exited': '⏏ Adopted CLI session has exited.',
   'worker.remote_close_in_progress': '⏳ The remote {backend} session is closing. Wait for the close result before sending another message.',
-  'worker.crash_loop_stopped': '⚠️ {cliName} crashed {count} times in 1 minute. Auto-restart disabled. Send a message to retry.',
+  'worker.crash_loop_stopped': '⚠️ {cliName} exited unexpectedly {count} times without sustained recovery. Auto-restart disabled. Send a message to retry.',
   'worker.crash_diagnostic_terminal': 'The web terminal, where available, preserves the last startup output. Fix the issue, then send a new message to retry.',
   'worker.crash_recent_output': 'Recent terminal output:',
   'worker.mojo_lineage_quarantined': '⚠️ This session was created before botmux recorded which mojo control plane (endpoint / workspace) it ran on, so its earlier remote session cannot be verified.\nIt has been parked rather than discarded — the previous context will NOT continue, and your next message starts a fresh mojo session on the current configuration. The parked id is kept on the session for manual cleanup: {lineage}',

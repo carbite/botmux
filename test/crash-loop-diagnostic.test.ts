@@ -239,6 +239,63 @@ describe("crash-loop diagnostic terminal (daemon 'claude_exit' handler)", () => 
     expect(updateSessionMock).toHaveBeenCalled();
   });
 
+  it('stops slow startup failures even when every attempt lasts longer than one minute', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const worker = makeFakeWorker();
+      const ds = makeDs('sid-slow-startup', worker);
+      __testOnly_setupWorkerHandlers(ds, worker);
+      for (let i = 0; i < 4; i++) {
+        now += 75_000;
+        await crashTimes(worker, 1, true);
+      }
+      expect(worker.send.mock.calls.filter(([m]: any[]) => m.type === 'restart')).toHaveLength(3);
+      expect(worker.send).toHaveBeenCalledWith({ type: 'park_diagnostic' });
+      expect(ds.session.suspendedColdResume).toBe(true);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('does not replenish retries for a prompt followed by another immediate crash', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const worker = makeFakeWorker();
+      const ds = makeDs('sid-brief-recovery', worker);
+      __testOnly_setupWorkerHandlers(ds, worker);
+      for (let i = 0; i < 4; i++) {
+        now += 75_000;
+        worker.emit('message', { type: 'prompt_ready' });
+        await flush();
+        now += 1_000;
+        await crashTimes(worker, 1, true);
+      }
+      expect(worker.send).toHaveBeenCalledWith({ type: 'park_diagnostic' });
+    } finally { clock.mockRestore(); }
+  });
+
+  it('replenishes another CLI recovery budget after a stable prompt, ignoring duplicate ready events', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const worker = makeFakeWorker();
+      const ds = makeDs('sid-stable-codex', worker);
+      ds.session.cliId = 'codex';
+      __testOnly_setupWorkerHandlers(ds, worker);
+      await crashTimes(worker, 3, true);
+      worker.emit('message', { type: 'prompt_ready' });
+      await flush();
+      const firstReadyAt = now;
+      now += 65_000;
+      worker.emit('message', { type: 'prompt_ready' });
+      await flush();
+      expect(restartCounts.get(ds.session.sessionId)?.promptReadyAt).toBe(firstReadyAt);
+      await crashTimes(worker, 1, true);
+      expect(restartCounts.get(ds.session.sessionId)?.count).toBe(1);
+      expect(worker.send).not.toHaveBeenCalledWith({ type: 'park_diagnostic' });
+    } finally { clock.mockRestore(); }
+  });
+
   // The parked worker respawns the CLI ITSELF when the next message arrives
   // (worker.ts `Message received after crash-loop stop`), so that message is the
   // only channel that can refresh its launch snapshot — a model changed while the

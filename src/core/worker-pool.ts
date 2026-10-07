@@ -4698,7 +4698,7 @@ async function closeWithdrawnSessionIfLedgerEmpty(
 
 // ─── Restart rate-limiting ──────────────────────────────────────────────────
 
-export const restartCounts = new Map<string, { count: number; lastAt: number }>();
+export const restartCounts = new Map<string, { count: number; lastAt: number; promptReadyAt?: number }>();
 
 // ─── Skills installation ────────────────────────────────────────────────────
 
@@ -13586,6 +13586,10 @@ function setupWorkerHandlers(
 
       case 'prompt_ready': {
         if (ds.worker !== worker) break;
+        const restartState = restartCounts.get(ds.session.sessionId);
+        if (restartState && restartState.promptReadyAt === undefined) {
+          restartState.promptReadyAt = Date.now();
+        }
         logger.info(`[${t}] ${sessionCliDisplayName(ds, botCfg)} is ready for input`);
         // A live prompt means a (re)spawn reached a working CLI — clear the lazy
         // cold-resume marker set when we parked a crash diagnostic shell. The
@@ -14813,18 +14817,21 @@ function setupWorkerHandlers(
           break;
         }
 
-        // Rate-limit auto-restart to prevent crash loops
+        // A slow failed launch can outlast a minute without ever reaching the
+        // CLI. Only a minute of healthy runtime AFTER a real prompt replenishes
+        // the retry budget; elapsed time between exits is not recovery evidence.
         const key = ds.session.sessionId;
         const rc = restartCounts.get(key) ?? { count: 0, lastAt: 0 };
         const now = Date.now();
-        if (now - rc.lastAt > 60_000) rc.count = 0; // reset after 1 min
+        if (rc.promptReadyAt !== undefined && now - rc.promptReadyAt > 60_000) rc.count = 0;
+        rc.promptReadyAt = undefined;
         rc.count++;
         rc.lastAt = now;
         restartCounts.set(key, rc);
 
         if (rc.count > 3) {
           ds.managedTurnOrigin = undefined;
-          logger.warn(`[${t}] ${sessionCliDisplayName(ds, botCfg)} crashed ${rc.count} times in 1 min, not auto-restarting`);
+          logger.warn(`[${t}] ${sessionCliDisplayName(ds, botCfg)} crashed ${rc.count} times without sustained recovery, not auto-restarting`);
           const keepDiagnosticWorker = !!msg.canParkDiagnostic && !!ds.worker && !ds.worker.killed;
           // Freeze the last streaming card so it doesn't stay at "working"
           // forever. Backends without a Web Terminal pass an empty read URL;

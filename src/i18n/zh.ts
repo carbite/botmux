@@ -1149,7 +1149,7 @@ export const messages: Record<string, string> = {
   // ─── Worker → daemon notices ─────────────────────────────────────────────
   'worker.adopted_session_exited': '⏏ /adopt的 CLI 会话已断开',
   'worker.remote_close_in_progress': '⏳ {backend} 远程会话正在关闭，请等待关闭结果后再发送消息。',
-  'worker.crash_loop_stopped': '⚠️ {cliName} 在 1 分钟内崩溃 {count} 次，已停止自动重启。发消息可触发重新启动。',
+  'worker.crash_loop_stopped': '⚠️ {cliName} 已连续异常退出 {count} 次且未稳定恢复，已停止自动重启。发消息可触发重新启动。',
   'worker.crash_diagnostic_terminal': 'Web 终端（若可用）保留了最后一次启动输出，可打开查看；修复问题后发新消息会重新启动。',
   'worker.crash_recent_output': '最近终端输出：',
   'worker.mojo_lineage_quarantined': '⚠️ 这个会话创建于 botmux 记录 mojo 控制面（endpoint / workspace）之前，因此无法确认它此前的远端会话跑在哪里。\n该远端会话已被暂存而非丢弃：原有上下文不会延续，你的下一条消息将在当前配置上新建 mojo 会话。暂存的 id 保留在会话上以便人工清理：{lineage}',

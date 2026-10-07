@@ -644,6 +644,45 @@ describe('post-settle restart fence', () => {
 });
 
 describe('late bare-shell launch recovery', () => {
+  it('checks a shell before publishing readiness or resetting restart budgets, even without queued input', () => {
+    const ready = caseRegion(workerSrc, 'function markPromptReady(): void', 16000);
+    const gate = ready.indexOf('isBareShellComm(readPaneLeafComm())');
+    const check = ready.indexOf('void detectBareShellLaunch()', gate);
+    expect(gate).toBeGreaterThanOrEqual(0);
+    expect(check).toBeGreaterThan(gate);
+    expect(ready.indexOf('isPromptReady = true;', check)).toBeGreaterThan(check);
+    expect(ready.indexOf('consecutiveInWorkerRestarts = 0;', check)).toBeGreaterThan(check);
+    expect(ready.indexOf("send({ type: 'prompt_ready' })", check)).toBeGreaterThan(check);
+    expect(ready).toContain('if (bareShellCheckInProgress) return;');
+    const deferred = ready.slice(check, ready.indexOf('structuredRejectedReadyEvidenceGeneration = undefined;', check));
+    expect(deferred).toContain('backend === launchBackend');
+    expect(deferred).toContain('cliSpawnGeneration === observedGeneration');
+    expect(deferred).toContain('!cliRestartInProgress');
+    // The ready check owns the same input latch as the original flush check;
+    // a concurrent message/injection must not start a second settle poll and
+    // clear that latch while the first poll is still pending.
+    for (const entry of ['async function flushPending()', 'async function flushPendingInjections()']) {
+      const flush = caseRegion(workerSrc, entry, 500);
+      expect(flush).toContain('if (bareShellCheckInProgress) return;');
+    }
+  });
+
+  it('warns once across failed respawns and rearms only after a real prompt', () => {
+    const detect = caseRegion(workerSrc, 'async function detectBareShellLaunch()', 5600);
+    const dedup = detect.indexOf('if (bareShellLaunchNotified) return true;');
+    expect(dedup).toBeGreaterThan(detect.indexOf('bareShellLaunchBlocked = true;'));
+    expect(detect.indexOf("type: 'user_notify'", dedup)).toBeGreaterThan(dedup);
+    const ready = caseRegion(workerSrc, 'function markPromptReady(): void', 16000);
+    expect(ready.indexOf('bareShellLaunchNotified = false;')).toBeGreaterThan(ready.indexOf('isPromptReady = true;'));
+    expect(workerSrc.match(/bareShellLaunchNotified = false;/g)).toHaveLength(2);
+  });
+
+  it('does not turn shell startup failures into fresh-session fallbacks that lose history', () => {
+    const budget = workerSrc.indexOf('if (!opts.skipRestartBudget && !bareShellLaunchBlocked)');
+    expect(budget).toBeGreaterThanOrEqual(0);
+    expect(workerSrc.slice(budget, budget + 250)).toContain('consecutiveInWorkerRestarts++;');
+  });
+
   it('releases the launch block only after PTY readiness and a non-shell pane leaf', () => {
     const helper = caseRegion(workerSrc, 'function recoverBareShellLaunchFromPty(observedBackend:', 1600);
     const generationFence = helper.indexOf('if (backend !== observedBackend)');

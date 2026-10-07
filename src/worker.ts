@@ -2573,6 +2573,8 @@ let hasRunStartupCommands = false;
  *  changed to a non-shell process; otherwise a shell prompt that resembles a
  *  CLI prompt could leak the queued message into zsh/bash. Reset per spawn. */
 let bareShellLaunchBlocked = false;
+/** One warning per unresolved launch failure, including automatic respawns. */
+let bareShellLaunchNotified = false;
 /** Per-spawn one-shot: has the bare-shell launch check already run for this
  *  spawn? Gates detectBareShellLaunch() to the FIRST flush only (the
  *  "about to type the first prompt" moment), independent of the startup-commands
@@ -9786,6 +9788,7 @@ let injectionFlushing = false;
 /** 排队注入一行 TUI 命令：idle（isPromptReady）时经串行恢复事务敲入。 */
 async function flushPendingInjections(): Promise<void> {
   if (idleDetector?.isStartupPending()) return;
+  if (bareShellCheckInProgress) return;
   // 不跨 restart 边界写入（与 flushPending 同款守卫）：destroySession 异步期间
   // backend 可能仍指向旧 CLI。
   if (cliRestartInProgress) return;
@@ -11541,6 +11544,7 @@ function markPromptReady(): void {
   // Screen probes and timeout fallbacks must honor the same startup evidence
   // as quiescence; a skeleton composer is not a ready CLI.
   if (idleDetector?.isStartupPending()) return;
+  if (bareShellCheckInProgress) return;
   if (bareShellLaunchBlocked) {
     log('Ignoring non-PTY prompt-ready while bare-shell launch block is active');
     return;
@@ -11660,12 +11664,26 @@ function markPromptReady(): void {
     flushQueuedInputAfterTurnStartEvidence();
     return;
   }
+  // Timeout/quiescence can fire while a login rcfile is still running. Check
+  // before publishing ready or resetting recovery budgets, even with no input
+  // queued. The flush guard alone runs AFTER those side effects.
+  if (!bareShellChecked && !lastInitConfig?.adoptMode && !lastInitConfig?.wrapperCli
+    && backend && isBareShellComm(readPaneLeafComm())) {
+    const launchBackend = backend;
+    const observedGeneration = cliSpawnGeneration;
+    void detectBareShellLaunch().then(blocked => {
+      if (!blocked && backend === launchBackend && cliSpawnGeneration === observedGeneration
+        && !cliRestartInProgress) markPromptReady();
+    }).catch(err => logError(`Launch readiness check failed: ${err instanceof Error ? err.message : String(err)}`));
+    return;
+  }
   structuredRejectedReadyEvidenceGeneration = undefined;
   // Quiescence is the terminal boundary for PTY adapters that do not emit an
   // explicit turn_terminal. Durable receivers keep authority until their exact
   // terminal receipt so an early screen-idle heuristic cannot release it.
   if (!durableTurnInFlight) releaseActiveTurnAuthority('prompt_ready');
   isPromptReady = true;
+  bareShellLaunchNotified = false;
   settleSessionRenameOnPrompt();
   // An old backend can still report idle while its async teardown is running.
   // Only a prompt observed after the general restart fence drops may release
@@ -12227,12 +12245,14 @@ async function detectBareShellLaunch(): Promise<boolean> {
   // await below yields the event loop for up to 2s, and a concurrent raw_input
   // IPC handler (which bypasses isFlushing to preserve busy-delivery) must not
   // type into the pane while its leaf is still the unsettled shell.
+  const checkedBackend = backend;
+  const checkedGeneration = cliSpawnGeneration;
   bareShellCheckInProgress = true;
   let comm: string | undefined;
   try {
-    comm = await settleLaunchComm(readPaneLeafComm);
+    comm = await settleLaunchComm(() => readPaneLeafComm(checkedBackend));
   } finally {
-    bareShellCheckInProgress = false;
+    if (cliSpawnGeneration === checkedGeneration) bareShellCheckInProgress = false;
   }
   // A restart can begin while we're suspended in the settle await: tmux staggers
   // teardown behind a 250–1999ms jitter, so cliRestartInProgress is already true
@@ -12243,6 +12263,7 @@ async function detectBareShellLaunch(): Promise<boolean> {
   // replacement generation (whose spawnCli resets bareShellChecked and re-runs
   // this check).
   if (cliRestartInProgress) return false;
+  if (backend !== checkedBackend || cliSpawnGeneration !== checkedGeneration) return false;
   if (!isBareShellComm(comm)) return false;          // CLI (rust/go/node) is running — healthy launch
 
   // The pane leaf is still a shell. A mismatch is the unmistakable signature
@@ -12281,6 +12302,8 @@ async function detectBareShellLaunch(): Promise<boolean> {
       `仅凭进程仍是 \`${shellComm}\` 无法判断具体原因，可能只是 rc 文件或机器负载让启动变慢。若长时间没有恢复，请打开 Web 终端查看当前提示，处理后等待自动继续，或使用 \`/restart\` 重启会话。`;
   }
   const pendingTurn = pendingMessages[0];
+  if (bareShellLaunchNotified) return true;
+  bareShellLaunchNotified = true;
   send({
     type: 'user_notify',
     turnId: pendingTurn?.turnId ?? currentBotmuxTurnId,
@@ -12365,6 +12388,7 @@ function directRpcTurnBlocksTypeAhead(): boolean {
 
 async function flushPending(): Promise<void> {
   if (idleDetector?.isStartupPending()) return;
+  if (bareShellCheckInProgress) return;
   // destroySession() may be asynchronous while `backend` still references the
   // old CLI. Never let a new flush (including one triggered by the old
   // backend's idle/task-done callback) write across that restart boundary.
@@ -18439,7 +18463,10 @@ async function restartCliProcess(
   // adapter probing is still re-run on every spawn. skipRestartBudget（角色
   // 切换的 cwd-move respawn）不计入：那是用户主动迁移不是崩溃恢复，计进去
   // 会让「切角色 + 一次无关重启」无故触发强制 FRESH 丢上下文。
-  if (!opts.skipRestartBudget) {
+  // A blocked shell never reached the CLI or attempted transcript recovery.
+  // Count it in the daemon crash budget, not the resume-to-FRESH budget, so an
+  // rcfile/host permission failure cannot discard a valid conversation.
+  if (!opts.skipRestartBudget && !bareShellLaunchBlocked) {
     consecutiveInWorkerRestarts++;
     log(`Restart count: ${consecutiveInWorkerRestarts} (>=2 forces FRESH)`);
   }
