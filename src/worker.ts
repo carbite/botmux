@@ -15627,13 +15627,6 @@ async function spawnCli(
     dispatchAttempt: cfg.dispatchAttempt,
     queuedActivationToken: cfg.queuedActivationToken,
   }) || (effectiveResume && cliAdapter.initialPromptArgsIgnoredOnResume === true)
-    // Sandboxed sessions send via the outbox relay, which needs the turn's relay
-    // capability. An argv-baked first prompt (OpenCode `--prompt` …) is reported
-    // "done" at the CLI's first ready prompt — seconds before the CLI actually
-    // answers — so the capability is gone by the time it runs `botmux send`
-    // ("managed host relay capability is stale or missing"). Queue it instead,
-    // like every later turn, so the turn stays open until the CLI goes idle.
-    || (cfg.sandbox === true && cliAdapter.passesInitialPromptViaArgs === true)
     || (!promptArgPreparationChanged && shouldDeferInitialPromptForArgLimit({
       passesInitialPromptViaArgs: cliAdapter.passesInitialPromptViaArgs === true,
       prompt: cfg.prompt,
@@ -18210,7 +18203,11 @@ async function spawnCli(
     log(forced
       ? `WARN First prompt hard timeout — ${cliName()} readyPattern did not arrive; forcing queued message flush`
       : 'First prompt timeout — enabling screen updates and flushing queued messages');
-    if (backend && cliAdapter?.busyPattern) {
+    // Adapters without a screen busy marker (OpenCode) still expose a session
+    // state store. Without this check an argv-baked first prompt is declared
+    // finished at the 15s timeout while the CLI is still answering, which
+    // releases the turn's authority (and a sandbox's relay capability) early.
+    if (backend && (cliAdapter?.busyPattern || cliAdapter?.isSessionBusy)) {
       if (deferPromptReadyWhileBusy(`${cliName()} first-prompt-timeout`, backend)
         || probeBusyPatternIdle(`${cliName()} first-prompt-timeout`, backend)) return;
     }
