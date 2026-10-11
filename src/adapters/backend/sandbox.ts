@@ -18,6 +18,7 @@
  * daemon-side watcher re-executes the send OUTSIDE the sandbox with real
  * credentials. No Feishu credential ever enters the sandbox.
  */
+import { execFileSync } from 'node:child_process';
 import { isMojoFullyRemote } from './mojo-types.js';
 import { mkdirSync, existsSync, writeFileSync, chmodSync, readdirSync, readFileSync, rmSync, rmdirSync, unlinkSync, statSync, lstatSync, readlinkSync, realpathSync, openSync, fstatSync, readSync, writeSync, closeSync, constants as fsConstants } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
@@ -976,6 +977,19 @@ export function attachSandboxOutbox(opts: { sessionId: string; dataDir: string }
  *  so removing the host-side source would break its relay. */
 function liveSandboxSids(): Set<string> {
   const live = new Set<string>();
+  if (process.platform === 'darwin') {
+    // No /proc on macOS. Every bot daemon shares this data dir but only knows its
+    // OWN active sessions, so without this check one bot's sweep deletes another
+    // bot's live outbox. The Seatbelt-confined CLI carries BOTMUX_SEND_RELAY
+    // (…/sandboxes/<sid>/outbox) in its environment; `ps -E` shows it for our uid.
+    try {
+      const out = execFileSync('ps', ['-axww', '-E', '-o', 'command='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+      const re = /sandboxes\/([^/\s]+)\/outbox/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(out))) live.add(m[1]);
+    } catch { /* ps unavailable → behave as before */ }
+    return live;
+  }
   let pids: string[];
   try { pids = readdirSync('/proc'); } catch { return live; }
   const re = /sandboxes\/([^/\0]+)/g;
