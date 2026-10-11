@@ -97,3 +97,29 @@ describe('relay host re-exec env (macOS Seatbelt panes)', () => {
     expect(env.BOTMUX_SESSION_ID).toBe('sid');
   });
 });
+
+describe('OpenCode MCP gateway entry', () => {
+  it('installs, detects and removes only its own entry in a dedicated opencode.json', async () => {
+    const { ensureGatewayEntry, inspectGatewayEntry, removeGatewayEntry } =
+      await import('../src/core/plugins/mcp/gateway-installer.js');
+    const { createOpenCodeAdapter } = await import('../src/adapters/cli/opencode.js');
+    expect(createOpenCodeAdapter().mcpGateway?.format).toBe('opencode-json');
+
+    const path = join(mkdtempSync(join(tmpdir(), 'oc-gw-')), 'opencode.json');
+    writeFileSync(path, JSON.stringify({ mcp: { other: { type: 'local', command: ['x'] } } }));
+    const adapter = { id: 'opencode', mcpGateway: { configPath: path, format: 'opencode-json' as const } };
+    const entry = { command: '/bin/botmux', args: ['mcp', 'serve'] };
+
+    expect(ensureGatewayEntry(adapter, entry).state).toBe('installed');
+    expect(ensureGatewayEntry(adapter, entry).state).toBe('unchanged');
+    const data = JSON.parse(readFileSync(path, 'utf-8'));
+    expect(data.mcp.botmux).toMatchObject({ type: 'local', command: ['/bin/botmux', 'mcp', 'serve'], enabled: true });
+    expect(data.mcp.other).toBeDefined();
+    expect(inspectGatewayEntry(adapter).state).toBe('configured');
+
+    expect(removeGatewayEntry(adapter).state).toBe('removed');
+    const after = JSON.parse(readFileSync(path, 'utf-8'));
+    expect(after.mcp.botmux).toBeUndefined();
+    expect(after.mcp.other).toBeDefined();
+  });
+});

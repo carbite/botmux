@@ -372,6 +372,8 @@ export interface OpenCodeLikeAdapterOptions {
   dbPath: () => string;
   skillsDir: string;
   hookConfigPath: string;
+  /** Dedicated global config file that receives the Botmux MCP Gateway entry. */
+  mcpGatewayConfigPath?: string;
   modelChoices: readonly string[] | undefined;
   /** live 模型枚举的子命令参数（opencode / mimo 都是 `models` 纯文本列表）。 */
   modelListArgs: readonly string[];
@@ -386,6 +388,9 @@ export function createOpenCodeLikeAdapter(pathOverride: string | undefined, runt
   let cachedBin: string | undefined;
   return {
     id: runtime.id,
+    ...(runtime.mcpGatewayConfigPath
+      ? { mcpGateway: { configPath: runtime.mcpGatewayConfigPath, format: 'opencode-json' as const } }
+      : {}),
     // Whole dir kept REAL, not just auth.json: opencode keeps its global SQLite DB
     // (opencode.db, WAL mode) here. Under the deny-by-default file sandbox a path
     // not in authPaths doesn't exist, so the DB is unreachable / can't get the
@@ -587,6 +592,7 @@ export function createOpenCodeAdapter(pathOverride?: string): CliAdapter {
     dbPath: opencodeDbPath,
     skillsDir: '~/.config/opencode/skills',
     hookConfigPath: '~/.config/opencode/plugin/botmux-ask.js',
+    mcpGatewayConfigPath: '~/.config/opencode/opencode.json',
     modelListArgs: ['models'],
     modelChoices: CLI_MODEL_CHOICES['opencode'],
   });

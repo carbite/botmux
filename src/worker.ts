@@ -14822,7 +14822,7 @@ async function spawnCli(
           configPath: join(claudeDataDir!, 'settings.json'),
         };
       }
-      if (adapter.mcpGateway) {
+      if (adapter.mcpGateway && (isClaudeFam || adapter.mcpGateway.format === 'codex-toml')) {
         const isolatedConfigPath = isClaudeFam
           ? join(claudeDataDir!, '.claude.json')
           : join(botHome, 'codex', 'config.toml');

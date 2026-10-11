@@ -205,6 +205,56 @@ function removeClaudeEntry(path: string): boolean {
   return true;
 }
 
+// OpenCode merges every global config file it finds (config.json,
+// opencode.json, opencode.jsonc). Botmux owns a dedicated plain-JSON file so
+// it never has to rewrite the user's commented opencode.jsonc. Local MCP
+// servers inherit OpenCode's process env, so the forwarded gateway keys need
+// no explicit mapping.
+function opencodeGatewayValue(entry: GatewayEntry): Record<string, unknown> {
+  return {
+    type: 'local',
+    command: [entry.command, ...entry.args],
+    enabled: true,
+    environment: { [MCP_GATEWAY_OWNER_ENV]: '1' },
+  };
+}
+
+function isOwnedOpencodeEntry(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const env = (value as Record<string, unknown>).environment;
+  return !!env && typeof env === 'object' && !Array.isArray(env)
+    && (env as Record<string, unknown>)[MCP_GATEWAY_OWNER_ENV] === '1';
+}
+
+function opencodeServers(data: Record<string, unknown>): Record<string, unknown> {
+  return data.mcp && typeof data.mcp === 'object' && !Array.isArray(data.mcp)
+    ? data.mcp as Record<string, unknown>
+    : {};
+}
+
+function ensureOpencodeEntry(path: string, entry: GatewayEntry): boolean {
+  const data = parseJsonConfig(path);
+  const servers = opencodeServers(data);
+  const desired = opencodeGatewayValue(entry);
+  if (JSON.stringify(servers.botmux) === JSON.stringify(desired)) return false;
+  if (!data.$schema) data.$schema = 'https://opencode.ai/config.json';
+  data.mcp = { ...servers, botmux: desired };
+  mkdirSync(dirname(path), { recursive: true });
+  atomicWriteFileSync(path, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  return true;
+}
+
+function removeOpencodeEntry(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const data = parseJsonConfig(path);
+  const servers = opencodeServers(data);
+  if (!isOwnedOpencodeEntry(servers.botmux)) return false;
+  delete servers.botmux;
+  data.mcp = servers;
+  atomicWriteFileSync(path, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  return true;
+}
+
 function configPath(spec: McpGatewayInstallSpec): string {
   return expandHomePath(spec.configPath);
 }
@@ -219,6 +269,8 @@ export function ensureGatewayEntry(
   try {
     const changed = spec.format === 'codex-toml'
       ? ensureCodexEntry(path, entry)
+      : spec.format === 'opencode-json'
+      ? ensureOpencodeEntry(path, entry)
       : ensureClaudeEntry(path, entry);
     return { cliId: adapter.id, state: changed ? 'installed' : 'unchanged', configPath: path };
   } catch (err) {
@@ -238,7 +290,11 @@ export function removeGatewayEntry(
   if (!spec) return { cliId: adapter.id, state: 'adapter-required' };
   const path = configPath(spec);
   try {
-    const removed = spec.format === 'codex-toml' ? removeCodexEntry(path) : removeClaudeEntry(path);
+    const removed = spec.format === 'codex-toml'
+      ? removeCodexEntry(path)
+      : spec.format === 'opencode-json'
+      ? removeOpencodeEntry(path)
+      : removeClaudeEntry(path);
     return { cliId: adapter.id, state: removed ? 'removed' : 'absent', configPath: path };
   } catch (err) {
     return {
@@ -263,6 +319,8 @@ export function inspectGatewayEntry(
           const text = readFileSync(path, 'utf-8');
           return text.includes(GATEWAY_START) && /\[mcp_servers\.(?:botmux|"botmux")\]/.test(text);
         })()
+      : spec.format === 'opencode-json'
+      ? isOwnedOpencodeEntry(opencodeServers(parseJsonConfig(path)).botmux)
       : (() => {
           const data = parseJsonConfig(path);
           const servers = data.mcpServers;
