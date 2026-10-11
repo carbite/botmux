@@ -248,6 +248,19 @@ function trackLifecycleRetirement(ds: DaemonSession, worker: ChildProcess): void
   worker.once('exit', release);
 }
 
+/** Union two sandboxPaths rule sets (per-bot + per-chat). Deny stays a union too. */
+export function mergeSandboxPaths(
+  a: { readWrite?: string[]; readOnly?: string[]; deny?: string[] } | undefined,
+  b: { readWrite?: string[]; readOnly?: string[]; deny?: string[] } | undefined,
+): { readWrite?: string[]; readOnly?: string[]; deny?: string[] } | undefined {
+  if (!a && !b) return undefined;
+  const u = (x?: string[], y?: string[]) => {
+    const all = [...(x ?? []), ...(y ?? [])];
+    return all.length ? Array.from(new Set(all)) : undefined;
+  };
+  return { readWrite: u(a?.readWrite, b?.readWrite), readOnly: u(a?.readOnly, b?.readOnly), deny: u(a?.deny, b?.deny) };
+}
+
 /**
  * Retiring worker processes for a session id — for liveness gates that outlive
  * the registry entry. A collision loser (or any process-only retirement) is
@@ -255,6 +268,7 @@ function trackLifecycleRetirement(ds: DaemonSession, worker: ChildProcess): void
  * in that window would otherwise find no ds, skip its producer-liveness gate,
  * and clear on pane probes alone (fifth-round review, A1 residual).
  */
+
 export function retiringWorkersForSession(sessionId: string): ChildProcess[] {
   return [...(lifecycleRetiringBySessionId.get(sessionId) ?? [])];
 }
@@ -11813,8 +11827,15 @@ export function forkWorker(
   // decision predates the sandbox feature → stays NOT sandboxed.
   if (ds.session.sandbox === undefined) {
     if (!resume) {
-      ds.session.sandbox = botCfg.sandbox === true;
-      ds.session.sandboxPaths = botCfg.sandboxPaths;
+      // A per-chat override (oncallChats[].sandbox) can only turn the sandbox ON —
+      // e.g. a family member's DM on a bot the owner uses unsandboxed. Its extra
+      // paths merge with the bot-level ones.
+      const chatSandbox = botCfg.oncallChats?.find(c => c.chatId === ds.session.chatId);
+      const chatForcesSandbox = chatSandbox?.sandbox === true;
+      ds.session.sandbox = botCfg.sandbox === true || chatForcesSandbox;
+      ds.session.sandboxPaths = chatForcesSandbox
+        ? mergeSandboxPaths(botCfg.sandboxPaths, chatSandbox?.sandboxPaths)
+        : botCfg.sandboxPaths;
       ds.session.sandboxHidePaths = botCfg.sandboxHidePaths ?? [];
       ds.session.sandboxReadonlyPaths = botCfg.sandboxReadonlyPaths ?? [];
       ds.session.sandboxNetwork = botCfg.sandboxNetwork !== false;

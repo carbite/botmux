@@ -15,7 +15,7 @@
  * step always works against the latest on-disk snapshot.
  */
 import { readFileSync, statSync } from 'node:fs';
-import { findOncallChat, getBot, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
+import { findOncallChat, getBot, normalizeOncallChat, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
 import { rmwBotEntry } from './config-store.js';
 import { logger } from '../utils/logger.js';
 import { expandHomePath } from '../utils/working-dir.js';
@@ -40,14 +40,18 @@ export async function bindOncall(
 ): Promise<{ ok: true; entry: OncallChat; created: boolean } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const next: OncallChat = { chatId, workingDir };
+  let next: OncallChat = { chatId, workingDir };
 
   const r = await rmwBotEntry<{ created: boolean }>(larkAppId, (entry) => {
     const cur: any[] = Array.isArray(entry.oncallChats) ? entry.oncallChats : [];
     const curIdx = cur.findIndex((c: any) => c?.chatId === chatId);
     const created = curIdx < 0;
+    // Re-binding (e.g. `/oncall bind` to change the dir) must NOT silently drop a
+    // per-chat sandbox: that would fail OPEN for every later session in the chat.
+    const prev = created ? null : normalizeOncallChat(cur[curIdx]);
+    if (prev?.sandbox) next = { ...next, sandbox: true, ...(prev.sandboxPaths ? { sandboxPaths: prev.sandboxPaths } : {}) };
     if (created) cur.push(next);
-    else cur[curIdx] = next; // wholesale replace strips legacy keys
+    else cur[curIdx] = next; // wholesale replace strips legacy keys (sandbox kept above)
     entry.oncallChats = cur;
     if (Array.isArray(entry.defaultOncallAutoboundChats) && entry.defaultOncallAutoboundChats.includes(chatId)) {
       entry.defaultOncallAutoboundChats = entry.defaultOncallAutoboundChats.filter((c: string) => c !== chatId);

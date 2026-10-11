@@ -1231,6 +1231,29 @@ export interface OncallChat {
   chatId: string;
   /** Default working directory used for every new topic spawned in this chat. */
   workingDir: string;
+  /** Per-chat file sandbox. `true` forces NEW sessions in this chat into the
+   *  sandbox even when the bot itself is not sandboxed (e.g. one family member's
+   *  DM on a bot the owner uses unsandboxed). It can only turn the sandbox ON:
+   *  a sandboxed bot stays sandboxed everywhere. Frozen onto the session at
+   *  creation like the bot-level flag, so editing it never retroactively
+   *  (un)sandboxes an existing session. */
+  sandbox?: boolean;
+  /** Extra sandbox allow/deny rules for sessions in this chat, merged with the
+   *  bot-level `sandboxPaths`. Only consulted when the session is sandboxed. */
+  sandboxPaths?: { readWrite?: string[]; readOnly?: string[]; deny?: string[] };
+}
+
+/** Normalize one raw `oncallChats` entry from bots.json; null when malformed. */
+export function normalizeOncallChat(c: any): OncallChat | null {
+  if (!c || typeof c.chatId !== 'string' || typeof c.workingDir !== 'string') return null;
+  const out: OncallChat = { chatId: c.chatId, workingDir: c.workingDir };
+  if (c.sandbox === true) out.sandbox = true;
+  const sp = c.sandboxPaths;
+  if (sp && typeof sp === 'object' && !Array.isArray(sp)) {
+    const list = (v: unknown) => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : undefined;
+    out.sandboxPaths = { readWrite: list(sp.readWrite), readOnly: list(sp.readOnly), deny: list(sp.deny) };
+  }
+  return out;
 }
 
 /**
@@ -2747,8 +2770,8 @@ function refreshRegisteredOncallChatsFromDisk(): void {
       const botChats: OncallChat[] = [];
       if (Array.isArray(entry.oncallChats)) {
         for (const chat of entry.oncallChats) {
-          if (chat && typeof chat.chatId === 'string' && typeof chat.workingDir === 'string') {
-            const normalized = { chatId: chat.chatId, workingDir: chat.workingDir };
+          const normalized = normalizeOncallChat(chat);
+          if (normalized) {
             botChats.push(normalized);
             chats.set(normalized.chatId, normalized);
           }
@@ -3422,11 +3445,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     let oncallChats: OncallChat[] | undefined;
     if (Array.isArray(entry.oncallChats)) {
       oncallChats = entry.oncallChats
-        .filter((c: any) => c && typeof c.chatId === 'string' && typeof c.workingDir === 'string')
-        .map((c: any) => ({
-          chatId: c.chatId,
-          workingDir: c.workingDir,
-        }));
+        .map((c: any) => normalizeOncallChat(c))
+        .filter((c: OncallChat | null): c is OncallChat => c !== null);
     }
 
     let allowedChatGroups: string[] | undefined;
