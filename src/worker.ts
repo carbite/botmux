@@ -15627,6 +15627,13 @@ async function spawnCli(
     dispatchAttempt: cfg.dispatchAttempt,
     queuedActivationToken: cfg.queuedActivationToken,
   }) || (effectiveResume && cliAdapter.initialPromptArgsIgnoredOnResume === true)
+    // Sandboxed sessions send via the outbox relay, which needs the turn's relay
+    // capability. An argv-baked first prompt (OpenCode `--prompt` …) is reported
+    // "done" at the CLI's first ready prompt — seconds before the CLI actually
+    // answers — so the capability is gone by the time it runs `botmux send`
+    // ("managed host relay capability is stale or missing"). Queue it instead,
+    // like every later turn, so the turn stays open until the CLI goes idle.
+    || (cfg.sandbox === true && cliAdapter.passesInitialPromptViaArgs === true)
     || (!promptArgPreparationChanged && shouldDeferInitialPromptForArgLimit({
       passesInitialPromptViaArgs: cliAdapter.passesInitialPromptViaArgs === true,
       prompt: cfg.prompt,
