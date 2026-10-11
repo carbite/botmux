@@ -1297,6 +1297,11 @@ export function buildRelayHostEnv(
   // as isolated. Durable origin still comes from authorize below; do not add
   // a cmdSend exemption based on child-mutable env or namespace-local PIDs.
   delete env.BOTMUX_ORIGIN_CHANNEL_ID;
+  // Same reason on macOS: the worker marks Seatbelt panes BOTMUX_READ_ISOLATED=1.
+  // The host re-exec is NOT isolated; inheriting the flag (with the channel id
+  // already stripped above) made every relayed send refuse with "read-isolated
+  // pane authority channel is missing". Linux never sets it, so it never broke there.
+  delete env.BOTMUX_READ_ISOLATED;
   delete env.BOTMUX_CARD_PREPARED_CONTENT_FILE;
   delete env.BOTMUX_HOST_RELAY_REQUIRES_CODEX_APP_LEDGER;
   if (preparedContentFile) {

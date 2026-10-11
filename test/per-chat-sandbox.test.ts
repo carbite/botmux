@@ -82,3 +82,18 @@ describe('opencode under the file sandbox', () => {
     expect(a.authPaths).not.toContain('~/.config/opencode');
   });
 });
+
+describe('relay host re-exec env (macOS Seatbelt panes)', () => {
+  it('drops the pane-only isolation markers so the host send is not misclassified', async () => {
+    vi.resetModules();
+    const { buildRelayHostEnv } = await import('../src/adapters/backend/sandbox.js');
+    const env = buildRelayHostEnv({
+      BOTMUX_SEND_RELAY: '/x/outbox', BOTMUX_ORIGIN_CHANNEL_ID: 'c'.repeat(64), BOTMUX_READ_ISOLATED: '1',
+      BOTMUX_SESSION_ID: 'sid', PATH: '/usr/bin',
+    });
+    expect(env.BOTMUX_SEND_RELAY).toBeUndefined();
+    expect(env.BOTMUX_ORIGIN_CHANNEL_ID).toBeUndefined();
+    expect(env.BOTMUX_READ_ISOLATED).toBeUndefined();
+    expect(env.BOTMUX_SESSION_ID).toBe('sid');
+  });
+});
