@@ -16720,6 +16720,12 @@ async function spawnCli(
       spawnBin = 'sandbox-exec';
       if (outbox) {
         childEnv.BOTMUX_SEND_RELAY = outbox;
+        // Persistent backends (tmux) inject only an allow-list of botmux env keys
+        // into the pane and SCRUB BOTMUX_SEND_RELAY, so childEnv alone never reaches
+        // the CLI (Linux carries it inside the bwrap argv instead). Carry it on the
+        // command line the same way: `env BOTMUX_SEND_RELAY=… sandbox-exec -f …`.
+        spawnArgs = [`BOTMUX_SEND_RELAY=${outbox}`, spawnBin, ...spawnArgs];
+        spawnBin = '/usr/bin/env';
         if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
         sandboxRelayOutbox = outbox;
         // session-id is FORCED here so a relayed send can't target another session.
