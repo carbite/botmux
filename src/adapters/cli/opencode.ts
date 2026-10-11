@@ -365,6 +365,10 @@ export interface OpenCodeLikeAdapterOptions {
   defaultBin: string;
   dataRoot: string;
   authPaths?: readonly string[];
+  /** Host paths the CLI must READ under the file sandbox but never write
+   *  (its global config/plugins): a sandboxed session must not be able to
+   *  rewrite config that the bot's unsandboxed sessions also load. */
+  readonlyPaths?: readonly string[];
   dbPath: () => string;
   skillsDir: string;
   hookConfigPath: string;
@@ -387,6 +391,7 @@ export function createOpenCodeLikeAdapter(pathOverride: string | undefined, runt
     // not in authPaths doesn't exist, so the DB is unreachable / can't get the
     // POSIX fcntl locks SQLite needs (same failure as codex, see codex.ts).
     authPaths: [...(runtime.authPaths ?? [runtime.dataRoot])],
+    sandboxReadonlyPaths: () => [...(runtime.readonlyPaths ?? [])],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
     buildArgs({ sessionId, resume, resumeSessionId, initialPrompt, model }) {
@@ -574,6 +579,11 @@ export function createOpenCodeAdapter(pathOverride?: string): CliAdapter {
     id: 'opencode',
     defaultBin: 'opencode',
     dataRoot: '~/.local/share/opencode',
+    // Sandboxed opencode exits with "Unexpected server error" when it cannot read
+    // its global config (~/.config/opencode/opencode.jsonc) or write its cache.
+    // Config stays read-only; data + cache + state are its own writable surfaces.
+    authPaths: ['~/.local/share/opencode', '~/.cache/opencode', '~/.local/state/opencode'],
+    readonlyPaths: ['~/.config/opencode'],
     dbPath: opencodeDbPath,
     skillsDir: '~/.config/opencode/skills',
     hookConfigPath: '~/.config/opencode/plugin/botmux-ask.js',

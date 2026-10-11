@@ -71,3 +71,14 @@ describe('per-chat sandbox', () => {
       .toEqual({ readWrite: ['/w'], readOnly: ['/a', '/b'], deny: ['/x'] });
   });
 });
+
+describe('opencode under the file sandbox', () => {
+  it('reads its global config read-only and owns data/cache/state read-write', async () => {
+    vi.resetModules();
+    const { createOpenCodeAdapter } = await import('../src/adapters/cli/opencode.js');
+    const a = createOpenCodeAdapter('/usr/local/bin/opencode');
+    expect(a.authPaths).toEqual(['~/.local/share/opencode', '~/.cache/opencode', '~/.local/state/opencode']);
+    expect(a.sandboxReadonlyPaths?.()).toEqual(['~/.config/opencode']);
+    expect(a.authPaths).not.toContain('~/.config/opencode');
+  });
+});

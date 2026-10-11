@@ -16339,7 +16339,10 @@ async function spawnCli(
 
     // Linux relay outbox (created by prepareDirectSandbox; in the policy so the
     // compiled plan binds it read-write).
-    const outbox = process.platform === 'linux'
+    // macOS uses the same daemon-mediated outbox relay: the Seatbelt-confined CLI
+    // cannot write the host data dir (turn-send ledger, session store), so an
+    // in-sandbox `botmux send` must hand off to the host watcher just like bwrap.
+    const outbox = process.platform === 'linux' || process.platform === 'darwin'
       ? join(canonical(dataDir), 'sandboxes', cfg.sessionId, 'outbox')
       : undefined;
     // Pre-create the outbox BEFORE buildFsPolicy so it survives the allow-rule
@@ -16715,7 +16718,20 @@ async function spawnCli(
       seatbeltProfilePath = profilePath;
       spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
       spawnBin = 'sandbox-exec';
-      log(`[file-sandbox] wrapping ${cliAdapter.id} in Seatbelt (fs-policy, ${policy.rules.length} rules): sandbox-exec -f ${profilePath}`);
+      if (outbox) {
+        childEnv.BOTMUX_SEND_RELAY = outbox;
+        if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
+        sandboxRelayOutbox = outbox;
+        // session-id is FORCED here so a relayed send can't target another session.
+        sandboxStopWatcher = startOutboxWatcher(
+          outbox,
+          childEnv,
+          cfg.sessionId,
+          { authorize: authorizeManagedSend },
+        );
+        publishSandboxRelayCapability();
+      }
+      log(`[file-sandbox] wrapping ${cliAdapter.id} in Seatbelt (fs-policy, ${policy.rules.length} rules): sandbox-exec -f ${profilePath}${outbox ? ` outbox=${outbox}` : ''}`);
     } else if (willReattachPersistent) {
       // Daemon-restart reattach to a live bwrap'd pane: backend.spawn() ignores
       // bin/args and just re-attaches. Only re-wire the outbox watcher (so the
