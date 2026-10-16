@@ -120,6 +120,47 @@ describe('TmuxBackend.probeSession', () => {
     expect(TmuxBackend.probeSession(NAME)).toBe('missing');
   });
 
+  describe('socket file missing (No such file or directory)', () => {
+    const stderr = Buffer.from('error connecting to /private/tmp/tmux-501/default (No such file or directory)');
+    function socketMissingWithPgrep(pgrep: () => unknown) {
+      mockedExecSync.mockImplementation((() => { throw err({ status: 1, signal: null, stderr }); }) as any);
+      mockedExecFileSync.mockImplementation(((cmd: string) => {
+        if (cmd === 'pgrep') return pgrep();
+        throw err({ status: 1, signal: null, stderr });
+      }) as any);
+    }
+
+    it('returns "missing" when no tmux process exists at all — 2026-10-16 post-reboot deadlock', () => {
+      socketMissingWithPgrep(() => { throw err({ status: 1, signal: null }); });
+      expect(TmuxBackend.probeSession(NAME)).toBe('missing');
+    });
+
+    it('stays "unknown" when a tmux process is still running (socket cleaned under a live server)', () => {
+      socketMissingWithPgrep(() => '');
+      expect(TmuxBackend.probeSession(NAME)).toBe('unknown');
+    });
+
+    it('stays "unknown" when pgrep itself fails or times out', () => {
+      socketMissingWithPgrep(() => { throw err({ code: 'ENOENT', status: null, signal: null }); });
+      expect(TmuxBackend.probeSession(NAME)).toBe('unknown');
+      socketMissingWithPgrep(() => { throw err({ code: 'ETIMEDOUT', status: 1, signal: null }); });
+      expect(TmuxBackend.probeSession(NAME)).toBe('unknown');
+      socketMissingWithPgrep(() => { throw err({ status: 2, signal: null }); });
+      expect(TmuxBackend.probeSession(NAME)).toBe('unknown');
+    });
+
+    it('does not consult pgrep for Connection refused (busy live server)', () => {
+      const refused = Buffer.from('error connecting to /tmp/tmux-0/default (Connection refused)');
+      const pgrep = vi.fn(() => { throw err({ status: 1, signal: null }); });
+      mockedExecFileSync.mockImplementation(((cmd: string) => {
+        if (cmd === 'pgrep') return pgrep();
+        throw err({ status: 1, signal: null, stderr: refused });
+      }) as any);
+      expect(TmuxBackend.probeSession(NAME)).toBe('unknown');
+      expect(pgrep).not.toHaveBeenCalled();
+    });
+  });
+
   it('hasSession() stays a conservative boolean wrapper (false on unknown)', () => {
     bothThrow({ status: 127, signal: null }, { code: 'ENOENT', status: null, signal: null });
     expect(TmuxBackend.hasSession(NAME)).toBe(false);

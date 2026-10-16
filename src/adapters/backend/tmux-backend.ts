@@ -58,6 +58,29 @@ export function isTmuxServerLevelErrorText(stderrText: string): boolean {
   return /error connecting to|lost server|server exited unexpectedly/i.test(stderrText);
 }
 
+/** The "socket file missing" subset of isTmuxServerLevelErrorText. */
+export function isTmuxSocketMissingErrorText(stderrText: string): boolean {
+  return /error connecting to .*\(No such file or directory\)/i.test(stderrText);
+}
+
+/**
+ * True only when `pgrep` positively reports that this user has no process
+ * whose name starts with "tmux" (covers macOS "tmux" and Linux "tmux: server").
+ * A live server whose socket was cleaned from /tmp still shows up here, so it
+ * stays 'unknown'. Any pgrep failure (missing binary, timeout, odd exit) is
+ * not proof → false.
+ */
+export function noTmuxProcessRunning(): boolean {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (uid === undefined) return false;
+  try {
+    execFileSync('pgrep', ['-u', String(uid), '^tmux'], { stdio: 'ignore', timeout: 3000 });
+    return false;
+  } catch (e: any) {
+    return !isExecTimeoutError(e) && e?.status === 1 && !e?.signal;
+  }
+}
+
 /**
  * True when a thrown exec*Sync error represents the caller's own `timeout`
  * deadline firing — regardless of the exit-status shape Node attached.
@@ -202,6 +225,12 @@ export class TmuxBackend implements SessionBackend {
       if (isExecTimeoutError(e)) return 'unknown';
       if (e && typeof e.status === 'number' && !e.signal) {
         const stderrText = (e.stderr?.toString?.() ?? '').trim();
+        // Socket file gone AND no tmux process of ours anywhere: no server
+        // exists, so no pane can exist either. Treating this as 'unknown'
+        // deadlocked confined sessions after a host reboot — they refused to
+        // start, and the refusal precedes the new-session that would have
+        // brought the server back (2026-10-16).
+        if (isTmuxSocketMissingErrorText(stderrText) && noTmuxProcessRunning()) return 'missing';
         if (isTmuxServerLevelErrorText(stderrText)) return 'unknown';
         return 'missing';
       }
